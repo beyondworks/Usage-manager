@@ -64,54 +64,24 @@ public enum Hooks {
 
     """
 
-    /// Holds an automatic compaction until the session has written its handover, then
-    /// lets it through. The session is told to `touch` the marker when it finishes; the
-    /// gate deletes the marker and passes.
+    /// Holds an automatic compaction until the session has written its handover.
     ///
-    /// Blocking is only safe because Claude Code treats a blocked *pre-emptive* compaction
-    /// as "skip it and carry on uncompacted" — but that headroom is finite, so the gate
-    /// gives up once the handover has had `maxHoldSeconds` to finish. A session that was
-    /// never alerted (small window, or alerts off) is never held.
-    ///
-    /// Elapsed time is the real budget: the gate is retried on every tool call, and a
-    /// handover (session file, vault save, lint, push) runs well past a dozen of them.
-    /// The attempt count is only a backstop against a retry storm.
+    /// The script is a thin shim: the decision lives in `Gate`, reached through the app
+    /// binary's `--gate` mode, so it can parse the transcript with the same reader the
+    /// app uses and keep working when the app is not running. A binary that has been
+    /// moved or deleted must never block a compaction, hence the executable test.
     static let gateScript = "precompact-gate.sh"
-    static let maxHolds = 40
-    static let maxHoldSeconds = 600
 
-    static let gateBody = """
-    #!/bin/sh
-    # Usage Manager: hold one automatic compaction until the handover is written.
-    \(readSid)
-    root="$HOME/.usage-manager"
-    [ -n "$sid" ] || exit 0
-    # Only hold sessions this app actually asked to press (armed on alert).
-    [ -f "$root/armed/$sid" ] || exit 0
-    if [ -f "$root/pressed/$sid" ]; then
-      rm -f "$root/pressed/$sid" "$root/armed/$sid" "$root/holds/$sid"
-      echo "$(date -u +%FT%TZ) $sid pass" >> "$root/gate.log"
-      exit 0
-    fi
-    # Give up rather than let the window fill to a hard limit error. The budget starts at
-    # the *first hold*, not at arming: a session alerted while the user is away would
-    # otherwise return to an already-expired budget. Count and start time share one file,
-    # so clearing the cycle cannot leave half of it behind.
-    mkdir -p "$root/holds"
-    now=$(date +%s)
-    set -- $(cat "$root/holds/$sid" 2>/dev/null)
-    n=${1:-0}; first=${2:-$now}
-    n=$((n + 1)); echo "$n $first" > "$root/holds/$sid"
-    if [ "$n" -gt \(maxHolds) ] || [ $((now - first)) -ge \(maxHoldSeconds) ]; then
-      rm -f "$root/holds/$sid" "$root/armed/$sid"
-      echo "$(date -u +%FT%TZ) $sid give-up after $n holds" >> "$root/gate.log"
-      exit 0
-    fi
-    echo "$(date -u +%FT%TZ) $sid hold $n" >> "$root/gate.log"
-    echo "Usage Manager: 핸드오버가 아직 저장되지 않아 압축을 잠시 미룹니다. 저장을 마친 뒤 touch \\"$root/pressed/$sid\\" 를 실행하세요." >&2
-    exit 2
+    static var gateBody: String {
+        """
+        #!/bin/sh
+        # Usage Manager: decide, at the moment of the compaction, whether to hold it.
+        bin=\(Bundle.main.executablePath.map { "\"" + $0 + "\"" } ?? "")
+        [ -n "$bin" ] && [ -x "$bin" ] || exit 0
+        exec "$bin" --gate
 
-    """
+        """
+    }
 
     // MARK: - State
 
@@ -201,7 +171,7 @@ public enum Hooks {
     static func writeScripts() throws {
         let fm = FileManager.default
         try fm.createDirectory(atPath: Paths.bin, withIntermediateDirectories: true)
-        for d in ["armed", "pressed", "holds"] {   // gate state
+        for d in ["pressed", "holds"] {   // gate state
             try? fm.createDirectory(atPath: Paths.root + "/" + d, withIntermediateDirectories: true)
         }
         for (name, body) in [(statusScript, statusBody), (promptScript, promptBody), (gateScript, gateBody)] {
@@ -278,33 +248,18 @@ public enum Hooks {
         return r
     }
 
-    /// Arm the gate for a session: its next automatic compaction is held until the
-    /// handover marker appears. Only sessions the app actually alerted are armed.
-    public static func arm(sessionId: String) {
-        guard sessionId.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "-" }) else { return }
+    /// The alerts switch, in a form the gate can read without the app running. Holding
+    /// a compaction while alerts are off would block with nothing to explain why.
+    public static func setGateEnabled(_ on: Bool) {
         let fm = FileManager.default
-        try? fm.createDirectory(atPath: Paths.root + "/armed", withIntermediateDirectories: true)
-        // Clear any counters left by an earlier cycle, so this session gets the full
-        // hold budget again rather than tripping the give-up rule immediately.
-        for leftover in ["/holds/\(sessionId)", "/pressed/\(sessionId)"] {
-            try? fm.removeItem(atPath: Paths.root + leftover)
-        }
-        fm.createFile(atPath: Paths.root + "/armed/" + sessionId, contents: nil)
-    }
-
-    /// Release a session the gate must no longer hold — it has reached the point where
-    /// blocking would produce a limit error rather than a compaction, or alerts were
-    /// switched off. The next PreCompact for it passes straight through.
-    public static func disarm(sessionId: String) {
-        guard sessionId.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "-" }) else { return }
-        for d in ["/armed/", "/holds/"] { try? FileManager.default.removeItem(atPath: Paths.root + d + sessionId) }
-    }
-
-    public static func disarmAll() {
-        let fm = FileManager.default
-        for d in ["/armed", "/holds"] {
-            for f in (try? fm.contentsOfDirectory(atPath: Paths.root + d)) ?? [] {
-                try? fm.removeItem(atPath: Paths.root + d + "/" + f)
+        let flag = Paths.root + "/gate-off"
+        if on {
+            try? fm.removeItem(atPath: flag)
+        } else {
+            try? fm.createDirectory(atPath: Paths.root, withIntermediateDirectories: true)
+            fm.createFile(atPath: flag, contents: nil)
+            for f in (try? fm.contentsOfDirectory(atPath: Paths.root + "/holds")) ?? [] {
+                try? fm.removeItem(atPath: Paths.root + "/holds/" + f)
             }
         }
     }

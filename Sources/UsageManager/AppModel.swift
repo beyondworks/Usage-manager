@@ -35,9 +35,7 @@ final class AppModel: ObservableObject {
     @Published var alertsOn: Bool {
         didSet {
             UserDefaults.standard.set(alertsOn, forKey: "alertsOn")
-            // Alerts off must also mean "hold nothing": an armed session left behind
-            // would keep blocking compactions with no notice explaining why.
-            if !alertsOn { Hooks.disarmAll() }
+            Hooks.setGateEnabled(alertsOn)
         }
     }
 
@@ -58,7 +56,10 @@ final class AppModel: ObservableObject {
         alertsOn = d.object(forKey: "alertsOn") as? Bool ?? true
         launchAtLogin = SMAppService.mainApp.status == .enabled
         hooks = Hooks.status()
+        // Command-line modes construct this too, and must not touch shared state — the
+        // gate's own `--gate` run would otherwise clear the switch it is about to read.
         guard live else { return }
+        Hooks.setGateEnabled(alertsOn)
         Notifier.shared.prepare()
         refresh()
         refreshQuotas(force: true)
@@ -137,27 +138,21 @@ final class AppModel: ObservableObject {
         if quotas != ordered { quotas = ordered }
     }
 
-    /// Per session: arm and notify once on approaching the compaction point Claude Code
-    /// itself will use, re-arm after a compaction drops the session well below it.
+    /// Per session: warn once on approaching the compaction point Claude Code itself
+    /// will use, re-arm after a compaction drops the session well below it.
     ///
-    /// Arming and the agent's notice are never suppressed — only the desktop push is
-    /// rate-limited, since a suppressed push used to take the hold with it.
+    /// This is an early warning, not the hold. A session can cross the point between two
+    /// scans — a parallel tool call moves it 30k tokens at once — so what actually holds
+    /// the compaction is the gate, which decides when Claude Code asks it. Getting the
+    /// warning out first only buys the agent time to write the handover before then.
     func evaluateAlerts() {
         let now = Date()
         var pending: [SessionCtx] = []
         for s in sessions where s.hasContext && s.wantsCompactionAlert {
             var st = ctxState[s.sessionId] ?? CtxState()
             let arm = s.armTokens(pct: ctxThreshold)
-            if s.ctxTokens >= s.hardTokens {
-                // Holding any longer risks a limit error instead of a compaction — and a
-                // reactive compaction after such an error arrives as `auto` as well.
-                Hooks.disarm(sessionId: s.sessionId)
+            if s.ctxTokens >= arm, st.armed, alertsOn {
                 st.armed = false
-            } else if s.ctxTokens >= arm, st.armed, alertsOn {
-                st.armed = false
-                // Arm first: the gate holds this session's automatic compaction until the
-                // marker appears, so the handover is never overtaken by a compaction.
-                if s.tool == .claudeCode { Hooks.arm(sessionId: s.sessionId) }
                 Hooks.queueNotice(sessionId: s.sessionId, text: notice(for: s))
                 if now.timeIntervalSince(st.lastNotified) > 600 { pending.append(s); st.lastNotified = now }
             } else if s.ctxTokens < arm - arm / 10 {
@@ -183,18 +178,16 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// What the agent is told. Deliberately non-interactive: a step that asks the user
-    /// anything, or that hands the work back with "run /compact yourself", lets the turn
-    /// end before the marker is written — and the hold expires with nothing saved.
+    /// What the agent is told ahead of time. Deliberately non-interactive: a step that
+    /// asks the user anything, or hands the work back with "run /compact yourself", lets
+    /// the turn end before the marker is written. Same procedure the gate states, so the
+    /// agent reads one set of instructions whichever arrives first.
     private func notice(for s: SessionCtx) -> String {
         """
         [Usage Manager] 이 세션은 곧 자동 압축 지점(약 \(s.compactionTokens(pct: ctxThreshold) / 1000)k 토큰)에 닿습니다. \
-        압축은 아래 ①②가 끝날 때까지 보류되어 있습니다. 사용자에게 묻지 말고 지금 바로 진행하세요.
-        ① 작업 폴더의 SESSION_HANDOVER.md 를 갱신합니다(목표·결정·진행 상황·미검증 항목·다음 단계·처리 중인 요청).
-        ② obsidian-save 로 AI-Sessions-Vault 에 저장합니다(lint 와 push 까지 마칩니다).
-        ③ 둘 다 끝난 뒤 마지막에 `touch ~/.usage-manager/pressed/\(s.sessionId)` 만 실행하면 압축이 이어집니다. \
-        /compact 를 직접 실행하거나 사용자에게 안내하지 마세요.
-        보류는 약 10분 뒤 자동으로 풀리므로, 다른 작업보다 먼저 처리하세요.
+        그 지점에서 압축은 아래 ①②가 끝날 때까지 보류됩니다. 지금 미리 해 두면 기다림 없이 이어집니다. \
+        사용자에게 묻지 말고 진행하세요.
+        \(Gate.steps(sid: s.sessionId))
         """
     }
 

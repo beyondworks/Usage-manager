@@ -102,52 +102,75 @@ kill $APP 2>/dev/null || true; wait $APP 2>/dev/null || true
 [ ! -f "$T/.usage-manager/alerts/$GPT.txt" ] || fail "GPT-model Codex session should not be alerted"
 grep -q "ctx-$GPT" "$T/app2.log" && fail "GPT-model session pushed a notification"
 
-# PreCompact gate: holds an automatic compaction until the handover marker appears
+# PreCompact gate: decides at the moment of the compaction, with no help from the app.
+# Arming it in advance was a race the app lost by a second (a parallel tool call moves a
+# session 30k tokens between two scans), so a PreCompact(auto) is itself the signal.
 GSID=33333333-cccc-dddd-eeee-ffffffffffff
-gate() { printf '{"session_id":"%s","hook_event_name":"PreCompact","trigger":"auto"}' "$1" \
-  | HOME="$T" /bin/sh "$T/.usage-manager/bin/precompact-gate.sh" >/dev/null 2>&1; echo $?; }
+TR="$T/gate-transcript.jsonl"
+transcript() {  # transcript <tokens> [entrypoint]
+  printf '{"type":"assistant","entrypoint":"%s","cwd":"/tmp/demo","message":{"model":"claude-opus-5","usage":{"input_tokens":10,"cache_read_input_tokens":%s}}}\n' \
+    "${2:-cli}" "$1" > "$TR"
+}
+gate() {  # gate <session-id> -> exit status
+  printf '{"session_id":"%s","hook_event_name":"PreCompact","trigger":"auto","transcript_path":"%s"}' "$1" "$TR" \
+    | HOME="$T" /bin/sh "$T/.usage-manager/bin/precompact-gate.sh" >/dev/null 2>&1; echo $?
+}
 
-# a session nobody armed is never held
-[ "$(gate "$GSID")" = 0 ] || fail "unarmed session was held"
+# a session the app never saw is held anyway, and the gate writes the notice itself
+rm -f "$T/.usage-manager/alerts/$GSID.txt"
+transcript 800000
+[ "$(gate "$GSID")" = 2 ] || fail "gate did not hold an automatic compaction"
+[ -f "$T/.usage-manager/alerts/$GSID.txt" ] || fail "gate held without leaving a notice"
+grep -q 'SESSION_HANDOVER' "$T/.usage-manager/alerts/$GSID.txt" || fail "gate notice lacks the handover step"
+grep -q 'obsidian-save' "$T/.usage-manager/alerts/$GSID.txt" || fail "gate notice lacks the vault step"
+probe "$GSID" PostToolUse | grep -q 'SESSION_HANDOVER' || fail "gate notice not delivered to the agent"
 
-touch "$T/.usage-manager/armed/$GSID"
-[ "$(gate "$GSID")" = 2 ] || fail "armed session without a marker should be held"
+# the marker written at the end of the handover lets it through, once
 touch "$T/.usage-manager/pressed/$GSID"
 [ "$(gate "$GSID")" = 0 ] || fail "marker present but compaction still held"
 [ ! -f "$T/.usage-manager/pressed/$GSID" ] || fail "marker not consumed"
-[ ! -f "$T/.usage-manager/armed/$GSID" ] || fail "arming not cleared after pass"
-
-# never hold forever: give up after the attempt cap. The cap has to outlast a real
-# handover, which spends well over a dozen tool calls (the gate retries on each one).
-touch "$T/.usage-manager/armed/$GSID"
-held=0
-for _ in $(seq 1 44); do [ "$(gate "$GSID")" = 2 ] && held=$((held+1)); done
-[ "$held" -eq 40 ] || fail "expected the full 40-hold budget, got $held"
-[ "$(gate "$GSID")" = 0 ] || fail "gate still holding after giving up"
-
-# a second cycle must hold again: leftovers from the first must not trip the give-up
-# rule (an old .since made the gate give up on its first try — every compaction after
-# the first went through without a handover).
-touch "$T/.usage-manager/armed/$GSID"
-[ "$(gate "$GSID")" = 2 ] || fail "second cycle: first hold missing"
-touch "$T/.usage-manager/pressed/$GSID"
-[ "$(gate "$GSID")" = 0 ] || fail "second cycle: marker ignored"
 [ -z "$(ls "$T/.usage-manager/holds/" 2>/dev/null)" ] || fail "counters left after pass: $(ls "$T/.usage-manager/holds/")"
-# the time budget runs from the first hold, not from arming: a session alerted while
-# the user was away must still get its full budget when they come back.
-touch -t "$(date -v-20M +%Y%m%d%H%M)" "$T/.usage-manager/armed/$GSID"
-[ "$(gate "$GSID")" = 2 ] || fail "an old arming must still hold once the session returns"
-# …and once that budget is actually spent, the gate stops holding
-echo "1 $(( $(date +%s) - 1200 ))" > "$T/.usage-manager/holds/$GSID"
-[ "$(gate "$GSID")" = 0 ] || fail "holding past the time budget"
-rm -f "$T/.usage-manager/armed/$GSID" "$T/.usage-manager/holds/$GSID"*
 
-# the session id comes from the top-level key: a PostToolUse payload can carry another
-# session's id nested inside tool_response (an MCP session lookup)
-arm '"top-level"'
-NEST=$(printf '{"session_id":"%s","hook_event_name":"PostToolUse","tool_response":{"session_id":"%s"}}' "$SID" 00000000-dead-beef-0000-000000000000 \
-  | HOME="$T" /bin/sh "$T/.usage-manager/bin/ctx-hook.sh")
-echo "$NEST" | grep -q 'top-level' || fail "nested session_id shadowed the real one: $NEST"
+# a second cycle must hold again
+[ "$(gate "$GSID")" = 2 ] || fail "second cycle: not held"
+
+# at the hard limit the gate lets go: holding there produces an error, not a compaction,
+# and the reactive compaction that follows one arrives as `auto` too. Judged against this
+# session's own first measurement, so no guess at the window size is involved.
+transcript 806000
+[ "$(gate "$GSID")" = 2 ] || fail "released early — 6k above the first hold is not the limit"
+transcript 815000
+[ "$(gate "$GSID")" = 0 ] || fail "still holding 15k above the first hold"
+[ -z "$(ls "$T/.usage-manager/holds/" 2>/dev/null)" ] || fail "counters left after releasing at the limit"
+
+# never hold forever. The cap has to outlast a real handover, which spends well over a
+# dozen tool calls (the gate is retried on each one).
+# (Giving up starts a fresh cycle rather than latching: by then the compaction it let
+# through has run, so the next PreCompact is a genuinely new one.)
+transcript 800000
+held=0
+while [ "$(gate "$GSID")" = 2 ]; do
+  held=$((held+1))
+  if [ "$held" -gt 45 ]; then break; fi
+done
+[ "$held" -eq 40 ] || fail "expected the full 40-hold budget, got $held"
+
+# the time budget runs from the first hold
+transcript 800000
+[ "$(gate "$GSID")" = 2 ] || fail "new cycle: not held"
+set -- $(cat "$T/.usage-manager/holds/$GSID")   # "attempts first-hold opening-tokens"
+echo "$1 $(( $2 - 1200 )) $3" > "$T/.usage-manager/holds/$GSID"
+[ "$(gate "$GSID")" = 0 ] || fail "holding past the time budget"
+
+# nobody is watching a headless run, so it is never held
+transcript 800000 sdk-cli
+[ "$(gate "$GSID")" = 0 ] || fail "headless session was held"
+
+# the alerts switch reaches the gate without the app running
+transcript 800000
+touch "$T/.usage-manager/gate-off"
+[ "$(gate "$GSID")" = 0 ] || fail "alerts off but the compaction was still held"
+rm -f "$T/.usage-manager/gate-off" "$T/.usage-manager/holds/$GSID"
 
 # the compaction point is written as the threshold, and removed on uninstall
 python3 -c "import json,sys;d=json.load(open(sys.argv[1]));sys.exit(0 if d.get('env',{}).get('CLAUDE_AUTOCOMPACT_PCT_OVERRIDE') else 1)" "$T/.claude/settings.json" \

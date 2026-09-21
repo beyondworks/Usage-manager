@@ -244,13 +244,16 @@ public final class LiveScanner: @unchecked Sendable {
         return st.yes
     }
 
-    private struct ClaudeTail {
-        let ctxTokens: Int; let model: String; let cwd: String; let title: String?; let entrypoint: String?
+    /// Also read by the PreCompact gate, which needs the same two facts (size, and
+    /// whether a human is attending) from a transcript it is handed by path.
+    public struct ClaudeTail: Sendable {
+        public let ctxTokens: Int; public let model: String
+        let cwd: String; let title: String?; public let entrypoint: String?
     }
 
     /// Backward pass over the last 256 KB: latest assistant `usage`, cwd, entrypoint,
     /// and the newest user-set session name.
-    private static func claudeTail(path: String) -> ClaudeTail? {
+    public static func claudeTail(path: String) -> ClaudeTail? {
         guard let data = FileTail.read(path: path) else { return nil }
         var cwd = "", title: String?, entrypoint: String?
         var hit: (ctx: Int, model: String)?

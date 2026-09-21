@@ -53,6 +53,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let args = CommandLine.arguments
         if args.contains("--dump") { dump(); exit(0) }
         if args.contains("--arm-check") { armCheck(); exit(0) }
+        if args.contains("--gate") {          // PreCompact(auto): hold, or let it through
+            guard case .hold = Gate.decide(input: FileHandle.standardInput.readDataToEndOfFile()) else { exit(0) }
+            FileHandle.standardError.write(Data(("Usage Manager: 핸드오버가 저장될 때까지 압축을 미룹니다. "
+                + "저장을 마친 뒤 마커를 touch 하면 압축이 이어집니다.\n").utf8))
+            exit(2)
+        }
         if let i = args.firstIndex(of: "--hooks"), i + 1 < args.count {   // --hooks on|off
             do { try args[i + 1] == "on" ? Hooks.install(compactAt: 85) : Hooks.uninstall() } catch { print("error:", error); exit(1) }
             print("hooks:", Hooks.status()); exit(0)
@@ -97,14 +103,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Real pixels (glass, vibrancy) need a real window capture: host the view on the
     /// same popover material as the menu-bar window, then `screencapture -l` it.
-    /// Walks a synthetic session up through its window and reports the first token
-    /// count at which the app actually arms the gate — through `evaluateAlerts`, not a
-    /// hand-made marker file. It must land below Claude Code's own compaction point, or
-    /// the compaction starts before anything has been armed to hold it.
-    /// Nothing should stay held once the app is gone: the gate would keep blocking
-    /// compactions with no notice explaining why (a kill leaves the time budget to it).
-    func applicationWillTerminate(_ notification: Notification) { Hooks.disarmAll() }
-
+    /// Walks a synthetic session up through its window and reports the first token count
+    /// at which the app warns it — through `evaluateAlerts`, not a hand-made file. The
+    /// warning must land below Claude Code's compaction point to be worth anything; the
+    /// hold itself no longer depends on it (see `Gate`).
     @MainActor private func armCheck() {
         let d = UserDefaults.standard
         let savedPct = d.object(forKey: "ctxThreshold"), savedOn = d.object(forKey: "alertsOn")
@@ -114,7 +116,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             d.set(pct, forKey: "ctxThreshold"); d.set(true, forKey: "alertsOn")
             let model = AppModel(live: false)   // init reads the defaults; no didSet, so nothing installs
             let sid = "armcheck-\(window)-\(pct)"
-            Hooks.disarm(sessionId: sid)
+            try? FileManager.default.removeItem(atPath: Paths.alerts + "/\(sid).txt")
             let probe = SessionCtx(sessionId: sid, project: "arm-check", model: "claude-opus-5",
                                    ctxTokens: 0, windowSize: window, mtime: Date())
             let compactAt = probe.compactionTokens(pct: pct)
@@ -123,13 +125,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 model.sessions = [SessionCtx(sessionId: sid, project: "arm-check", model: "claude-opus-5",
                                              ctxTokens: t, windowSize: window, mtime: Date())]
                 model.evaluateAlerts()
-                if FileManager.default.fileExists(atPath: Paths.root + "/armed/" + sid) { armedAt = t }
+                if FileManager.default.fileExists(atPath: Paths.alerts + "/\(sid).txt") { armedAt = t }
                 t += 500
             }
-            Hooks.disarm(sessionId: sid)
+            try? FileManager.default.removeItem(atPath: Paths.alerts + "/\(sid).txt")
             let ok = armedAt > 0 && armedAt < compactAt
             if !ok { failed = true }
-            print("\(ok ? "OK  " : "FAIL") window \(window) pct \(pct): armed at \(armedAt), claude compacts at \(compactAt)")
+            print("\(ok ? "OK  " : "FAIL") window \(window) pct \(pct): warned at \(armedAt), claude compacts at \(compactAt)")
         }
         exit(failed ? 1 : 0)
     }
