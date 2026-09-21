@@ -98,8 +98,39 @@ kill $APP 2>/dev/null || true; wait $APP 2>/dev/null || true
 [ ! -f "$T/.usage-manager/alerts/$GPT.txt" ] || fail "GPT-model Codex session should not be alerted"
 grep -q "ctx-$GPT" "$T/app2.log" && fail "GPT-model session pushed a notification"
 
+# PreCompact gate: holds an automatic compaction until the handover marker appears
+GSID=33333333-cccc-dddd-eeee-ffffffffffff
+gate() { printf '{"session_id":"%s","hook_event_name":"PreCompact","trigger":"auto"}' "$1" \
+  | HOME="$T" /bin/sh "$T/.usage-manager/bin/precompact-gate.sh" >/dev/null 2>&1; echo $?; }
+
+# a session nobody armed is never held
+[ "$(gate "$GSID")" = 0 ] || fail "unarmed session was held"
+
+touch "$T/.usage-manager/armed/$GSID"
+[ "$(gate "$GSID")" = 2 ] || fail "armed session without a marker should be held"
+touch "$T/.usage-manager/pressed/$GSID"
+[ "$(gate "$GSID")" = 0 ] || fail "marker present but compaction still held"
+[ ! -f "$T/.usage-manager/pressed/$GSID" ] || fail "marker not consumed"
+[ ! -f "$T/.usage-manager/armed/$GSID" ] || fail "arming not cleared after pass"
+
+# never hold forever: give up after the attempt cap
+touch "$T/.usage-manager/armed/$GSID"
+held=0
+for _ in $(seq 1 12); do [ "$(gate "$GSID")" = 2 ] && held=$((held+1)); done
+[ "$held" -le 8 ] || fail "gate held $held times, past the cap"
+[ "$held" -ge 1 ] || fail "gate never held at all"
+[ "$(gate "$GSID")" = 0 ] || fail "gate still holding after giving up"
+
+# the compaction point is written as the threshold, and removed on uninstall
+python3 -c "import json,sys;d=json.load(open(sys.argv[1]));sys.exit(0 if d.get('env',{}).get('CLAUDE_AUTOCOMPACT_PCT_OVERRIDE') else 1)" "$T/.claude/settings.json" \
+  || fail "compaction point not written"
+python3 -c "import json,sys;d=json.load(open(sys.argv[1]));sys.exit(0 if any('precompact-gate' in json.dumps(g) for g in d['hooks']['PreCompact']) else 1)" "$T/.claude/settings.json" \
+  || fail "gate hook not registered"
+
 HOME="$T" "$BIN" --hooks off | grep -q 'claude: false, codex: false' || fail "uninstall status"
 grep -q 'PREV-STATUS' "$T/.claude/settings.json" || fail "statusLine not restored"
+! grep -q 'CLAUDE_AUTOCOMPACT_PCT_OVERRIDE' "$T/.claude/settings.json" || fail "compaction point left behind"
+! grep -q 'precompact-gate' "$T/.claude/settings.json" || fail "gate hook left behind"
 grep -q 'echo user-hook' "$T/.claude/settings.json" || fail "user hook lost on uninstall"
 ! grep -q ctx-hook "$T/.codex/hooks.json" || fail "codex hook left behind"
 echo "OK hooks"

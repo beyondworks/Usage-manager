@@ -52,7 +52,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let args = CommandLine.arguments
         if args.contains("--dump") { dump(); exit(0) }
         if let i = args.firstIndex(of: "--hooks"), i + 1 < args.count {   // --hooks on|off
-            do { try args[i + 1] == "on" ? Hooks.install() : Hooks.uninstall() } catch { print("error:", error); exit(1) }
+            do { try args[i + 1] == "on" ? Hooks.install(compactAt: 85) : Hooks.uninstall() } catch { print("error:", error); exit(1) }
             print("hooks:", Hooks.status()); exit(0)
         }
         if let i = args.firstIndex(of: "--snap"), i + 1 < args.count { snap(to: args[i + 1]); return }

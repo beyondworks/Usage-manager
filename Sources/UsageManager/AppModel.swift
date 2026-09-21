@@ -24,7 +24,14 @@ final class AppModel: ObservableObject {
     @Published var launchAtLogin = false
 
     /// Alert threshold (% of context window) and on/off — persisted across launches.
-    @Published var ctxThreshold: Int { didSet { UserDefaults.standard.set(ctxThreshold, forKey: "ctxThreshold"); evaluateAlerts() } }
+    @Published var ctxThreshold: Int {
+        didSet {
+            UserDefaults.standard.set(ctxThreshold, forKey: "ctxThreshold")
+            evaluateAlerts()
+            // The threshold is also the auto-compaction point, so keep the two in step.
+            if hooks.claude { try? Hooks.install(compactAt: ctxThreshold) }
+        }
+    }
     @Published var alertsOn: Bool { didSet { UserDefaults.standard.set(alertsOn, forKey: "alertsOn") } }
 
     private struct CtxState { var armed = true; var lastNotified = Date.distantPast }
@@ -144,10 +151,15 @@ final class AppModel: ObservableObject {
         guard !pending.isEmpty else { return }
 
         for s in pending {
+            // Arm first: the gate holds this session's automatic compaction until the
+            // marker below appears, so the handover is never overtaken by a compaction.
+            if s.tool == .claudeCode { Hooks.arm(sessionId: s.sessionId) }
             Hooks.queueNotice(sessionId: s.sessionId, text: """
-                [Usage Manager] 이 세션의 컨텍스트가 \(Int(s.usedPercent))%로 알림 기준(\(ctxThreshold)%)을 넘었습니다. \
-                진행 중인 작업 단위를 마무리한 뒤 /raw-press 스킬로 핸드오버 문서와 옵시디언을 갱신하고, \
-                끝나면 사용자에게 /compact 실행을 요청하세요. 자동 압축이 먼저 오면 맥락을 잃습니다.
+                [Usage Manager] 이 세션의 컨텍스트가 \(Int(s.usedPercent))%로 기준(\(ctxThreshold)%)을 넘었습니다. \
+                자동 압축은 아래 절차가 끝날 때까지 보류됩니다. 진행 중인 작업 단위를 마무리한 뒤 \
+                /raw-press 스킬로 핸드오버 문서와 옵시디언을 갱신하고, 끝나면 바로 \
+                `touch ~/.usage-manager/pressed/\(s.sessionId)` 를 실행하세요. \
+                그 순간부터 압축이 진행됩니다. 오래 미루면 보류가 자동 해제되니 먼저 처리하세요.
                 """)
         }
         if pending.count > 3 {
@@ -214,7 +226,7 @@ final class AppModel: ObservableObject {
 
     func setHooks(_ on: Bool) {
         do {
-            if on { try Hooks.install() } else { try Hooks.uninstall() }
+            if on { try Hooks.install(compactAt: ctxThreshold) } else { try Hooks.uninstall() }
             hookError = nil
         } catch {
             hookError = error.localizedDescription

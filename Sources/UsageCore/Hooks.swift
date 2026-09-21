@@ -57,6 +57,50 @@ public enum Hooks {
 
     """
 
+    /// Holds an automatic compaction until the session has written its handover, then
+    /// lets it through. The session is told to `touch` the marker when it finishes; the
+    /// gate deletes the marker and passes.
+    ///
+    /// Blocking is only safe because Claude Code treats a blocked *pre-emptive* compaction
+    /// as "skip it and carry on uncompacted" — but that headroom is finite, so the gate
+    /// gives up after `maxHolds` attempts or `maxHoldSeconds`, whichever comes first, and
+    /// lets the compaction proceed. A session that was never alerted (small window, or
+    /// alerts off) is never held.
+    static let gateScript = "precompact-gate.sh"
+    static let maxHolds = 8
+    static let maxHoldSeconds = 600
+
+    static let gateBody = """
+    #!/bin/sh
+    # Usage Manager: hold one automatic compaction until the handover is written.
+    \(readSid)
+    root="$HOME/.usage-manager"
+    [ -n "$sid" ] || exit 0
+    # Only hold sessions this app actually asked to press (armed on alert).
+    [ -f "$root/armed/$sid" ] || exit 0
+    if [ -f "$root/pressed/$sid" ]; then
+      rm -f "$root/pressed/$sid" "$root/armed/$sid" "$root/holds/$sid"
+      echo "$(date -u +%FT%TZ) $sid pass" >> "$root/gate.log"
+      exit 0
+    fi
+    # Give up rather than let the window fill to a hard limit error.
+    mkdir -p "$root/holds"
+    n=$(cat "$root/holds/$sid" 2>/dev/null || echo 0)
+    first=$(cat "$root/holds/$sid.since" 2>/dev/null || echo "")
+    now=$(date +%s)
+    [ -n "$first" ] || { first=$now; echo "$first" > "$root/holds/$sid.since"; }
+    n=$((n + 1)); echo "$n" > "$root/holds/$sid"
+    if [ "$n" -ge \(maxHolds) ] || [ $((now - first)) -ge \(maxHoldSeconds) ]; then
+      rm -f "$root/holds/$sid" "$root/holds/$sid.since" "$root/armed/$sid"
+      echo "$(date -u +%FT%TZ) $sid give-up after $n holds" >> "$root/gate.log"
+      exit 0
+    fi
+    echo "$(date -u +%FT%TZ) $sid hold $n" >> "$root/gate.log"
+    echo "Usage Manager: 핸드오버 갱신(/raw-press)이 끝나지 않아 압축을 잠시 미룹니다." >&2
+    exit 2
+
+    """
+
     // MARK: - State
 
     public struct Status: Sendable, Equatable {
@@ -72,7 +116,7 @@ public enum Hooks {
         let claude = readJSON(claudeSettings)
         let codex = readJSON(codexHooks)
         let status = (claude?["statusLine"] as? [String: Any])?["command"] as? String ?? ""
-        return Status(claude: status == statusCommand && hasPromptHook(claude),
+        return Status(claude: status == statusCommand && hasPromptHook(claude) && hasGateHook(claude),
                       codex: hasPromptHook(codex), codexTrusted: codexTrusted(codex))
     }
 
@@ -97,7 +141,7 @@ public enum Hooks {
 
     // MARK: - Install / uninstall
 
-    public static func install() throws {
+    public static func install(compactAt: Int? = nil) throws {
         try writeScripts()
         if FileManager.default.fileExists(atPath: Paths.home + "/.claude") {
             var s = readJSON(claudeSettings) ?? [:]
@@ -109,7 +153,9 @@ public enum Hooks {
                 line["command"] = statusCommand
                 s["statusLine"] = line
             }
-            try writeJSON(addPromptHook(s), to: claudeSettings)
+            s = addGateHook(addPromptHook(s))
+            if let pct = compactAt { s = setCompactPercent(s, pct) }
+            try writeJSON(s, to: claudeSettings)
         }
         if FileManager.default.fileExists(atPath: Paths.home + "/.codex") {
             try writeJSON(addPromptHook(readJSON(codexHooks) ?? [:]), to: codexHooks)
@@ -122,7 +168,7 @@ public enum Hooks {
                 let prev = (try? String(contentsOfFile: prevStatusLine, encoding: .utf8)) ?? ""
                 if prev.isEmpty { s["statusLine"] = nil } else { line["command"] = prev; s["statusLine"] = line }
             }
-            try writeJSON(removePromptHook(s), to: claudeSettings)
+            try writeJSON(clearCompactPercent(removeGateHook(removePromptHook(s))), to: claudeSettings)
         }
         if let c = readJSON(codexHooks) { try writeJSON(removePromptHook(c), to: codexHooks) }
     }
@@ -143,7 +189,10 @@ public enum Hooks {
     static func writeScripts() throws {
         let fm = FileManager.default
         try fm.createDirectory(atPath: Paths.bin, withIntermediateDirectories: true)
-        for (name, body) in [(statusScript, statusBody), (promptScript, promptBody)] {
+        for d in ["armed", "pressed", "holds"] {   // gate state
+            try? fm.createDirectory(atPath: Paths.root + "/" + d, withIntermediateDirectories: true)
+        }
+        for (name, body) in [(statusScript, statusBody), (promptScript, promptBody), (gateScript, gateBody)] {
             let path = Paths.bin + "/" + name
             try body.write(toFile: path, atomically: true, encoding: .utf8)
             try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: path)
@@ -153,6 +202,67 @@ public enum Hooks {
     // Exact-match identity: other tools' scripts can share our file names (e.g. `ponytail-statusline.sh`).
     private static var promptCommand: String { "/bin/sh " + Paths.bin + "/" + promptScript }
     private static var statusCommand: String { "/bin/sh " + Paths.bin + "/" + statusScript }
+
+    static var gateCommand: String { "/bin/sh " + Paths.bin + "/" + gateScript }
+
+    /// The auto-compaction point, as a share of the context window. Claude Code reads
+    /// this when a session starts, so a change lands on the next session.
+    private static let compactKey = "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"
+
+    static func setCompactPercent(_ root: [String: Any], _ pct: Int) -> [String: Any] {
+        var r = root
+        var env = r["env"] as? [String: Any] ?? [:]
+        env[compactKey] = String(max(1, min(100, pct)))
+        r["env"] = env
+        return r
+    }
+
+    static func clearCompactPercent(_ root: [String: Any]) -> [String: Any] {
+        guard var env = root["env"] as? [String: Any], env[compactKey] != nil else { return root }
+        var r = root
+        env[compactKey] = nil
+        r["env"] = env.isEmpty ? nil : env
+        return r
+    }
+
+    /// The gate guards *automatic* compactions only; a manual /compact is never held.
+    private static func isOurGate(_ group: [String: Any]) -> Bool {
+        ((group["hooks"] as? [[String: Any]]) ?? []).contains { $0["command"] as? String == gateCommand }
+    }
+
+    static func hasGateHook(_ root: [String: Any]?) -> Bool {
+        (((root?["hooks"] as? [String: Any])?["PreCompact"] as? [[String: Any]]) ?? []).contains(where: isOurGate)
+    }
+
+    static func addGateHook(_ root: [String: Any]) -> [String: Any] {
+        guard !hasGateHook(root) else { return root }
+        var r = root
+        var hooks = r["hooks"] as? [String: Any] ?? [:]
+        var list = hooks["PreCompact"] as? [[String: Any]] ?? []
+        list.append(["matcher": "auto",
+                     "hooks": [["type": "command", "command": gateCommand, "timeout": 10]]])
+        hooks["PreCompact"] = list
+        r["hooks"] = hooks
+        return r
+    }
+
+    static func removeGateHook(_ root: [String: Any]) -> [String: Any] {
+        guard var hooks = root["hooks"] as? [String: Any],
+              let list = hooks["PreCompact"] as? [[String: Any]] else { return root }
+        var r = root
+        let kept = list.filter { !isOurGate($0) }
+        hooks["PreCompact"] = kept.isEmpty ? nil : kept
+        r["hooks"] = hooks
+        return r
+    }
+
+    /// Arm the gate for a session: its next automatic compaction is held until the
+    /// handover marker appears. Only sessions the app actually alerted are armed.
+    public static func arm(sessionId: String) {
+        guard sessionId.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "-" }) else { return }
+        try? FileManager.default.createDirectory(atPath: Paths.root + "/armed", withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: Paths.root + "/armed/" + sessionId, contents: nil)
+    }
 
     private static func isOurs(_ group: [String: Any]) -> Bool {
         ((group["hooks"] as? [[String: Any]]) ?? []).contains { $0["command"] as? String == promptCommand }
