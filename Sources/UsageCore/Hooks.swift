@@ -20,10 +20,17 @@ public enum Hooks {
     static var claudeSettings: String { Paths.home + "/.claude/settings.json" }
     static var codexHooks: String { Paths.home + "/.codex/hooks.json" }
 
-    // Hook stdin carries `session_id`; everything else in it is ignored.
+    // Hook stdin carries `session_id`; everything else in it is ignored. `plutil` reads
+    // the *top-level* key — a PostToolUse payload can carry another session's id nested
+    // inside `tool_response` (an MCP session lookup), and a `.*` regex would take that
+    // one. The regex stays as a fallback for a payload plutil won't parse.
     private static let readSid = """
     in=$(cat | tr -d '\\n')
-    sid=$(printf '%s' "$in" | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\\([A-Za-z0-9-]*\\)".*/\\1/p')
+    sid=$(printf '%s' "$in" | plutil -extract session_id raw -o - - 2>/dev/null)
+    case "$sid" in
+      ""|*[!A-Za-z0-9-]*)
+        sid=$(printf '%s' "$in" | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\\([A-Za-z0-9-]*\\)".*/\\1/p') ;;
+    esac
     """
 
     static let statusBody = """
@@ -63,11 +70,14 @@ public enum Hooks {
     ///
     /// Blocking is only safe because Claude Code treats a blocked *pre-emptive* compaction
     /// as "skip it and carry on uncompacted" — but that headroom is finite, so the gate
-    /// gives up after `maxHolds` attempts or `maxHoldSeconds`, whichever comes first, and
-    /// lets the compaction proceed. A session that was never alerted (small window, or
-    /// alerts off) is never held.
+    /// gives up once the handover has had `maxHoldSeconds` to finish. A session that was
+    /// never alerted (small window, or alerts off) is never held.
+    ///
+    /// Elapsed time is the real budget: the gate is retried on every tool call, and a
+    /// handover (session file, vault save, lint, push) runs well past a dozen of them.
+    /// The attempt count is only a backstop against a retry storm.
     static let gateScript = "precompact-gate.sh"
-    static let maxHolds = 8
+    static let maxHolds = 40
     static let maxHoldSeconds = 600
 
     static let gateBody = """
@@ -83,20 +93,22 @@ public enum Hooks {
       echo "$(date -u +%FT%TZ) $sid pass" >> "$root/gate.log"
       exit 0
     fi
-    # Give up rather than let the window fill to a hard limit error. The arming file's
-    # own timestamp is the start of this cycle — no separate timer file to go stale.
+    # Give up rather than let the window fill to a hard limit error. The budget starts at
+    # the *first hold*, not at arming: a session alerted while the user is away would
+    # otherwise return to an already-expired budget. Count and start time share one file,
+    # so clearing the cycle cannot leave half of it behind.
     mkdir -p "$root/holds"
-    n=$(cat "$root/holds/$sid" 2>/dev/null || echo 0)
     now=$(date +%s)
-    first=$(stat -f %m "$root/armed/$sid" 2>/dev/null || echo "$now")
-    n=$((n + 1)); echo "$n" > "$root/holds/$sid"
+    set -- $(cat "$root/holds/$sid" 2>/dev/null)
+    n=${1:-0}; first=${2:-$now}
+    n=$((n + 1)); echo "$n $first" > "$root/holds/$sid"
     if [ "$n" -gt \(maxHolds) ] || [ $((now - first)) -ge \(maxHoldSeconds) ]; then
       rm -f "$root/holds/$sid" "$root/armed/$sid"
       echo "$(date -u +%FT%TZ) $sid give-up after $n holds" >> "$root/gate.log"
       exit 0
     fi
     echo "$(date -u +%FT%TZ) $sid hold $n" >> "$root/gate.log"
-    echo "Usage Manager: 핸드오버 갱신(/raw-press)이 끝나지 않아 압축을 잠시 미룹니다." >&2
+    echo "Usage Manager: 핸드오버가 아직 저장되지 않아 압축을 잠시 미룹니다. 저장을 마친 뒤 touch \\"$root/pressed/$sid\\" 를 실행하세요." >&2
     exit 2
 
     """
@@ -208,10 +220,18 @@ public enum Hooks {
     /// The auto-compaction point, as a share of the context window. Claude Code reads
     /// this when a session starts, so a change lands on the next session.
     private static let compactKey = "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"
+    private static var prevCompactPct: String { Paths.root + "/compactpct.prev" }
 
     static func setCompactPercent(_ root: [String: Any], _ pct: Int) -> [String: Any] {
         var r = root
         var env = r["env"] as? [String: Any] ?? [:]
+        // Record whatever the user had here before the first install, so uninstall can
+        // restore it instead of deleting a setting we did not create. An empty file
+        // means "there was none".
+        if !FileManager.default.fileExists(atPath: prevCompactPct) {
+            try? FileManager.default.createDirectory(atPath: Paths.root, withIntermediateDirectories: true)
+            try? (env[compactKey] as? String ?? "").write(toFile: prevCompactPct, atomically: true, encoding: .utf8)
+        }
         env[compactKey] = String(max(1, min(100, pct)))
         r["env"] = env
         return r
@@ -220,7 +240,9 @@ public enum Hooks {
     static func clearCompactPercent(_ root: [String: Any]) -> [String: Any] {
         guard var env = root["env"] as? [String: Any], env[compactKey] != nil else { return root }
         var r = root
-        env[compactKey] = nil
+        let prev = (try? String(contentsOfFile: prevCompactPct, encoding: .utf8)) ?? ""
+        env[compactKey] = prev.isEmpty ? nil : prev
+        try? FileManager.default.removeItem(atPath: prevCompactPct)
         r["env"] = env.isEmpty ? nil : env
         return r
     }
@@ -268,6 +290,23 @@ public enum Hooks {
             try? fm.removeItem(atPath: Paths.root + leftover)
         }
         fm.createFile(atPath: Paths.root + "/armed/" + sessionId, contents: nil)
+    }
+
+    /// Release a session the gate must no longer hold — it has reached the point where
+    /// blocking would produce a limit error rather than a compaction, or alerts were
+    /// switched off. The next PreCompact for it passes straight through.
+    public static func disarm(sessionId: String) {
+        guard sessionId.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "-" }) else { return }
+        for d in ["/armed/", "/holds/"] { try? FileManager.default.removeItem(atPath: Paths.root + d + sessionId) }
+    }
+
+    public static func disarmAll() {
+        let fm = FileManager.default
+        for d in ["/armed", "/holds"] {
+            for f in (try? fm.contentsOfDirectory(atPath: Paths.root + d)) ?? [] {
+                try? fm.removeItem(atPath: Paths.root + d + "/" + f)
+            }
+        }
     }
 
     private static func isOurs(_ group: [String: Any]) -> Bool {

@@ -32,7 +32,14 @@ final class AppModel: ObservableObject {
             if hooks.claude { try? Hooks.install(compactAt: ctxThreshold) }
         }
     }
-    @Published var alertsOn: Bool { didSet { UserDefaults.standard.set(alertsOn, forKey: "alertsOn") } }
+    @Published var alertsOn: Bool {
+        didSet {
+            UserDefaults.standard.set(alertsOn, forKey: "alertsOn")
+            // Alerts off must also mean "hold nothing": an armed session left behind
+            // would keep blocking compactions with no notice explaining why.
+            if !alertsOn { Hooks.disarmAll() }
+        }
+    }
 
     private struct CtxState { var armed = true; var lastNotified = Date.distantPast }
     private var ctxState: [String: CtxState] = [:]
@@ -130,18 +137,30 @@ final class AppModel: ObservableObject {
         if quotas != ordered { quotas = ordered }
     }
 
-    /// Per session: fire once when crossing the threshold, re-arm after it drops
-    /// 10 points below (i.e. after a compaction), at most once per 10 minutes.
-    private func evaluateAlerts() {
+    /// Per session: arm and notify once on approaching the compaction point Claude Code
+    /// itself will use, re-arm after a compaction drops the session well below it.
+    ///
+    /// Arming and the agent's notice are never suppressed — only the desktop push is
+    /// rate-limited, since a suppressed push used to take the hold with it.
+    func evaluateAlerts() {
         let now = Date()
         var pending: [SessionCtx] = []
         for s in sessions where s.hasContext && s.wantsCompactionAlert {
             var st = ctxState[s.sessionId] ?? CtxState()
-            if s.usedPercent >= Double(ctxThreshold) {
-                if alertsOn, st.armed, now.timeIntervalSince(st.lastNotified) > 600 {
-                    pending.append(s); st.armed = false; st.lastNotified = now
-                }
-            } else if s.usedPercent < Double(ctxThreshold) - 10 {
+            let arm = s.armTokens(pct: ctxThreshold)
+            if s.ctxTokens >= s.hardTokens {
+                // Holding any longer risks a limit error instead of a compaction — and a
+                // reactive compaction after such an error arrives as `auto` as well.
+                Hooks.disarm(sessionId: s.sessionId)
+                st.armed = false
+            } else if s.ctxTokens >= arm, st.armed, alertsOn {
+                st.armed = false
+                // Arm first: the gate holds this session's automatic compaction until the
+                // marker appears, so the handover is never overtaken by a compaction.
+                if s.tool == .claudeCode { Hooks.arm(sessionId: s.sessionId) }
+                Hooks.queueNotice(sessionId: s.sessionId, text: notice(for: s))
+                if now.timeIntervalSince(st.lastNotified) > 600 { pending.append(s); st.lastNotified = now }
+            } else if s.ctxTokens < arm - arm / 10 {
                 st.armed = true
             }
             ctxState[s.sessionId] = st
@@ -150,28 +169,33 @@ final class AppModel: ObservableObject {
         ctxState = ctxState.filter { active.contains($0.key) }
         guard !pending.isEmpty else { return }
 
-        for s in pending {
-            // Arm first: the gate holds this session's automatic compaction until the
-            // marker below appears, so the handover is never overtaken by a compaction.
-            if s.tool == .claudeCode { Hooks.arm(sessionId: s.sessionId) }
-            Hooks.queueNotice(sessionId: s.sessionId, text: """
-                [Usage Manager] 이 세션의 컨텍스트가 \(Int(s.usedPercent))%로 기준(\(ctxThreshold)%)을 넘었습니다. \
-                자동 압축은 아래 절차가 끝날 때까지 보류됩니다. 진행 중인 작업 단위를 마무리한 뒤 \
-                /raw-press 스킬로 핸드오버 문서와 옵시디언을 갱신하고, 끝나면 바로 \
-                `touch ~/.usage-manager/pressed/\(s.sessionId)` 를 실행하세요. \
-                그 순간부터 압축이 진행됩니다. 오래 미루면 보류가 자동 해제되니 먼저 처리하세요.
-                """)
-        }
+        // The push tells the user what is already happening; the agent has been told to
+        // write the handover, and the compaction resumes by itself once it has.
         if pending.count > 3 {
             let list = pending.prefix(6).map { "\($0.label) \(Int($0.usedPercent))%" }.joined(separator: ", ")
-            Notifier.shared.fire(title: "\(pending.count)개 세션 컨텍스트 \(ctxThreshold)% 초과",
-                                 body: "\(list) · /compact 권장", id: "ctx-summary")
+            Notifier.shared.fire(title: "\(pending.count)개 세션이 압축 직전입니다",
+                                 body: "\(list) · 핸드오버 저장 후 자동 압축", id: "ctx-summary")
         } else {
             for s in pending {
-                Notifier.shared.fire(title: "컨텍스트 \(Int(s.usedPercent))% · \(s.label)",
-                                     body: "\(s.tool.display) · /compact 권장", id: "ctx-\(s.sessionId)")
+                Notifier.shared.fire(title: "압축 직전 \(Int(s.usedPercent))% · \(s.label)",
+                                     body: "\(s.tool.display) · 핸드오버 저장 후 자동 압축", id: "ctx-\(s.sessionId)")
             }
         }
+    }
+
+    /// What the agent is told. Deliberately non-interactive: a step that asks the user
+    /// anything, or that hands the work back with "run /compact yourself", lets the turn
+    /// end before the marker is written — and the hold expires with nothing saved.
+    private func notice(for s: SessionCtx) -> String {
+        """
+        [Usage Manager] 이 세션은 곧 자동 압축 지점(약 \(s.compactionTokens(pct: ctxThreshold) / 1000)k 토큰)에 닿습니다. \
+        압축은 아래 ①②가 끝날 때까지 보류되어 있습니다. 사용자에게 묻지 말고 지금 바로 진행하세요.
+        ① 작업 폴더의 SESSION_HANDOVER.md 를 갱신합니다(목표·결정·진행 상황·미검증 항목·다음 단계·처리 중인 요청).
+        ② obsidian-save 로 AI-Sessions-Vault 에 저장합니다(lint 와 push 까지 마칩니다).
+        ③ 둘 다 끝난 뒤 마지막에 `touch ~/.usage-manager/pressed/\(s.sessionId)` 만 실행하면 압축이 이어집니다. \
+        /compact 를 직접 실행하거나 사용자에게 안내하지 마세요.
+        보류는 약 10분 뒤 자동으로 풀리므로, 다른 작업보다 먼저 처리하세요.
+        """
     }
 
     /// Fixed sample data for the README screenshot, so a published image never carries

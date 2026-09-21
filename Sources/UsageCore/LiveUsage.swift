@@ -36,6 +36,28 @@ public struct SessionCtx: Sendable, Identifiable, Equatable {
     }
     public var label: String { title ?? project }
 
+    /// Claude Code reserves output headroom before measuring occupancy: it compacts at
+    /// `min(effective × pct/100, effective − 13000)`, where `effective = window − 20000`
+    /// (the reserve is `min(model max output, 20000)`, and every model we alert on is
+    /// well above 20k). Measured: 120 past auto-compactions in a 1M window land at a
+    /// median of 966,511 tokens, i.e. the `effective − 13000` arm of that formula.
+    ///
+    /// The app must act *before* this point or the compaction it wants to hold has
+    /// already started, so the threshold the user picks is what Claude Code is told,
+    /// and these are what the app itself watches.
+    var effectiveWindow: Int { max(0, windowSize - 20_000) }
+    public func compactionTokens(pct: Int) -> Int {
+        min(effectiveWindow * max(1, min(100, pct)) / 100, effectiveWindow - 13_000)
+    }
+    /// Arm one step earlier, so the notice and the gate's arming both land first.
+    public func armTokens(pct: Int) -> Int {
+        compactionTokens(pct: pct) - min(30_000, effectiveWindow / 20)
+    }
+    /// Past this, holding a compaction risks a hard limit error instead of a compaction
+    /// (a reactive compaction after such an error arrives as `auto` too), so the app
+    /// disarms the gate rather than letting it block.
+    public var hardTokens: Int { effectiveWindow - 13_000 }
+
     public init(tool: ToolKind = .claudeCode, sessionId: String, project: String, title: String? = nil,
                 model: String, ctxTokens: Int, windowSize: Int, mtime: Date) {
         self.tool = tool; self.sessionId = sessionId; self.project = project; self.title = title

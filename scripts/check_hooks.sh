@@ -13,6 +13,7 @@ fail() { echo "FAIL: $*"; exit 1; }
 mkdir -p "$T/.claude" "$T/.codex"
 cat > "$T/.claude/settings.json" <<'EOF'
 {"statusLine":{"type":"command","command":"cat >/dev/null; echo PREV-STATUS # other-statusline.sh"},
+ "env":{"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE":"72","KEEP_ME":"1"},
  "hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"echo user-hook"}]}]}}
 EOF
 echo '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo codex-stop"}]}]}}' > "$T/.codex/hooks.json"
@@ -47,9 +48,9 @@ probe() {  # probe <session-id> <event> -> hook stdout
 arm() { printf '%s' "$1" > "$T/.usage-manager/alerts/$SID.txt"; }
 
 # PostToolUse: reaches a long autonomous run that sends no prompt
-arm '"컨텍스트 90% — /raw-press 후 /compact"'
+arm '"컨텍스트 90% — SESSION_HANDOVER 갱신 후 마커"'
 OUT=$(probe "$SID" PostToolUse)
-echo "$OUT" | python3 -c "import json,sys;d=json.load(sys.stdin)['hookSpecificOutput'];sys.exit(0 if d['hookEventName']=='PostToolUse' and 'raw-press' in d['additionalContext'] else 1)" \
+echo "$OUT" | python3 -c "import json,sys;d=json.load(sys.stdin)['hookSpecificOutput'];sys.exit(0 if d['hookEventName']=='PostToolUse' and 'SESSION_HANDOVER' in d['additionalContext'] else 1)" \
   || fail "PostToolUse notice malformed: $OUT"
 [ -z "$(probe "$SID" PostToolUse)" ] || fail "notice delivered twice"
 
@@ -64,15 +65,18 @@ arm '"세 번째"'
 SID2=99999999-8888-7777-6666-555555555555
 now=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
 mkdir -p "$T/.claude/projects/-tmp-demo"
-printf '%s\n' "{\"type\":\"assistant\",\"entrypoint\":\"cli\",\"cwd\":\"/tmp/demo\",\"timestamp\":\"$now\",\"message\":{\"model\":\"claude-opus-5\",\"usage\":{\"input_tokens\":10,\"cache_read_input_tokens\":980000}}}" \
-  > "$T/.claude/projects/-tmp-demo/$SID2.jsonl"   # 98% of a 1M window: over any allowed threshold
+printf '%s\n' "{\"type\":\"assistant\",\"entrypoint\":\"cli\",\"cwd\":\"/tmp/demo\",\"timestamp\":\"$now\",\"message\":{\"model\":\"claude-opus-5\",\"usage\":{\"input_tokens\":10,\"cache_read_input_tokens\":950000}}}" \
+  > "$T/.claude/projects/-tmp-demo/$SID2.jsonl"   # 95% of a 1M window: past the arming point for any threshold the slider allows
+   # (50–95), and still short of the hard limit where the gate must let go
 HOME="$T" "$BIN" > "$T/app.log" 2>&1 &
 APP=$!
 for _ in $(seq 1 40); do [ -f "$T/.usage-manager/alerts/$SID2.txt" ] && break; sleep 0.5; done
 kill $APP 2>/dev/null || true; wait $APP 2>/dev/null || true
-[ -f "$T/.usage-manager/alerts/$SID2.txt" ] || fail "app did not queue a notice for a 98% session"
-grep -q 'raw-press' "$T/.usage-manager/alerts/$SID2.txt" || fail "queued notice lacks the raw-press instruction"
-probe "$SID2" PostToolUse | grep -q 'raw-press' || fail "app-queued notice not delivered to the agent"
+[ -f "$T/.usage-manager/alerts/$SID2.txt" ] || fail "app did not queue a notice for a session near its compaction point"
+grep -q 'SESSION_HANDOVER' "$T/.usage-manager/alerts/$SID2.txt" || fail "queued notice lacks the handover instruction"
+grep -q 'obsidian-save' "$T/.usage-manager/alerts/$SID2.txt" || fail "queued notice lacks the vault step"
+grep -q '묻지 말고' "$T/.usage-manager/alerts/$SID2.txt" || fail "queued notice is not phrased non-interactively"
+probe "$SID2" PostToolUse | grep -q 'SESSION_HANDOVER' || fail "app-queued notice not delivered to the agent"
 grep -q '\[notify\]' "$T/app.log" || fail "no push fired"
 
 # model-level alert filter: Codex hosts both GPT (258k window) and Kimi (996k), so a
@@ -82,7 +86,7 @@ codex_session() {  # codex_session <session-id> <model>
   ts=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
   { printf '{"type":"session_meta","payload":{"session_id":"%s","cwd":"/tmp/demo"}}\n' "$1"
     printf '{"type":"turn_context","payload":{"model":"%s"}}\n' "$2"
-    printf '{"timestamp":"%s","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":980000},"model_context_window":1000000}}}\n' "$ts"
+    printf '{"timestamp":"%s","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":950000},"model_context_window":1000000}}}\n' "$ts"
   } > "$d/rollout-$1.jsonl"
 }
 GPT=11111111-aaaa-bbbb-cccc-dddddddddddd
@@ -94,7 +98,7 @@ HOME="$T" "$BIN" > "$T/app2.log" 2>&1 &
 APP=$!
 for _ in $(seq 1 40); do [ -f "$T/.usage-manager/alerts/$KIMI.txt" ] && break; sleep 0.5; done
 kill $APP 2>/dev/null || true; wait $APP 2>/dev/null || true
-[ -f "$T/.usage-manager/alerts/$KIMI.txt" ] || fail "Kimi session at 98% got no notice"
+[ -f "$T/.usage-manager/alerts/$KIMI.txt" ] || fail "Kimi session near its compaction point got no notice"
 [ ! -f "$T/.usage-manager/alerts/$GPT.txt" ] || fail "GPT-model Codex session should not be alerted"
 grep -q "ctx-$GPT" "$T/app2.log" && fail "GPT-model session pushed a notification"
 
@@ -113,13 +117,12 @@ touch "$T/.usage-manager/pressed/$GSID"
 [ ! -f "$T/.usage-manager/pressed/$GSID" ] || fail "marker not consumed"
 [ ! -f "$T/.usage-manager/armed/$GSID" ] || fail "arming not cleared after pass"
 
-# never hold forever: give up after the attempt cap
+# never hold forever: give up after the attempt cap. The cap has to outlast a real
+# handover, which spends well over a dozen tool calls (the gate retries on each one).
 touch "$T/.usage-manager/armed/$GSID"
 held=0
-for _ in $(seq 1 12); do [ "$(gate "$GSID")" = 2 ] && held=$((held+1)); done
-[ "$held" -le 8 ] || fail "gate held $held times, past the cap"
-[ "$held" -eq 8 ] || fail "expected the full 8-hold budget, got $held"
-[ "$held" -ge 1 ] || fail "gate never held at all"
+for _ in $(seq 1 44); do [ "$(gate "$GSID")" = 2 ] && held=$((held+1)); done
+[ "$held" -eq 40 ] || fail "expected the full 40-hold budget, got $held"
 [ "$(gate "$GSID")" = 0 ] || fail "gate still holding after giving up"
 
 # a second cycle must hold again: leftovers from the first must not trip the give-up
@@ -130,10 +133,21 @@ touch "$T/.usage-manager/armed/$GSID"
 touch "$T/.usage-manager/pressed/$GSID"
 [ "$(gate "$GSID")" = 0 ] || fail "second cycle: marker ignored"
 [ -z "$(ls "$T/.usage-manager/holds/" 2>/dev/null)" ] || fail "counters left after pass: $(ls "$T/.usage-manager/holds/")"
-# an arming older than the time budget gives up at once (that is the point of the cap)
+# the time budget runs from the first hold, not from arming: a session alerted while
+# the user was away must still get its full budget when they come back.
 touch -t "$(date -v-20M +%Y%m%d%H%M)" "$T/.usage-manager/armed/$GSID"
-[ "$(gate "$GSID")" = 0 ] || fail "an arming past the time budget should stop holding"
+[ "$(gate "$GSID")" = 2 ] || fail "an old arming must still hold once the session returns"
+# …and once that budget is actually spent, the gate stops holding
+echo "1 $(( $(date +%s) - 1200 ))" > "$T/.usage-manager/holds/$GSID"
+[ "$(gate "$GSID")" = 0 ] || fail "holding past the time budget"
 rm -f "$T/.usage-manager/armed/$GSID" "$T/.usage-manager/holds/$GSID"*
+
+# the session id comes from the top-level key: a PostToolUse payload can carry another
+# session's id nested inside tool_response (an MCP session lookup)
+arm '"top-level"'
+NEST=$(printf '{"session_id":"%s","hook_event_name":"PostToolUse","tool_response":{"session_id":"%s"}}' "$SID" 00000000-dead-beef-0000-000000000000 \
+  | HOME="$T" /bin/sh "$T/.usage-manager/bin/ctx-hook.sh")
+echo "$NEST" | grep -q 'top-level' || fail "nested session_id shadowed the real one: $NEST"
 
 # the compaction point is written as the threshold, and removed on uninstall
 python3 -c "import json,sys;d=json.load(open(sys.argv[1]));sys.exit(0 if d.get('env',{}).get('CLAUDE_AUTOCOMPACT_PCT_OVERRIDE') else 1)" "$T/.claude/settings.json" \
@@ -143,8 +157,13 @@ python3 -c "import json,sys;d=json.load(open(sys.argv[1]));sys.exit(0 if any('pr
 
 HOME="$T" "$BIN" --hooks off | grep -q 'claude: false, codex: false' || fail "uninstall status"
 grep -q 'PREV-STATUS' "$T/.claude/settings.json" || fail "statusLine not restored"
-! grep -q 'CLAUDE_AUTOCOMPACT_PCT_OVERRIDE' "$T/.claude/settings.json" || fail "compaction point left behind"
+python3 -c "import json,sys;d=json.load(open(sys.argv[1]));e=d.get('env',{});sys.exit(0 if e.get('CLAUDE_AUTOCOMPACT_PCT_OVERRIDE')=='72' and e.get('KEEP_ME')=='1' else 1)" "$T/.claude/settings.json" \
+  || fail "the user's own compaction point was not restored"
 ! grep -q 'precompact-gate' "$T/.claude/settings.json" || fail "gate hook left behind"
 grep -q 'echo user-hook' "$T/.claude/settings.json" || fail "user hook lost on uninstall"
 ! grep -q ctx-hook "$T/.codex/hooks.json" || fail "codex hook left behind"
+# the app must arm before Claude Code's own compaction point, or the compaction it is
+# meant to hold has already begun. Goes through the app's real alert path.
+HOME="$T" "$BIN" --arm-check || fail "app arms at or after Claude Code's compaction point"
+
 echo "OK hooks"
