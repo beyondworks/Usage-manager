@@ -16,8 +16,15 @@ public enum ClaudeUsage {
     /// Why the last fetch produced nothing — shown by `--dump`, never the token itself.
     public private(set) nonisolated(unsafe) static var lastDiagnosis = "not attempted"
 
+    /// Set when the endpoint answers 429; no request goes out again until it passes.
+    private nonisolated(unsafe) static var backoffUntil = Date.distantPast
+
     public static func fetch() async -> ProviderQuota? {
         guard !Paths.offline else { lastDiagnosis = "offline"; return nil }
+        if Date() < backoffUntil {
+            lastDiagnosis = "rate-limited, retrying in \(Int(backoffUntil.timeIntervalSinceNow))s"
+            return nil
+        }
         guard let token = sessionToken() else { lastDiagnosis = "no live session token"; return nil }
         var req = URLRequest(url: URL(string: "https://api.anthropic.com/api/oauth/usage")!,
                              timeoutInterval: 8)
@@ -26,10 +33,21 @@ public enum ClaudeUsage {
         guard let (data, resp) = try? await URLSession.shared.data(for: req) else {
             lastDiagnosis = "network error"; return nil
         }
-        let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        let http = resp as? HTTPURLResponse
+        let code = http?.statusCode ?? 0
+        if code == 429 {
+            // Honour the server's own wait; asking again sooner is what keeps a 429 alive.
+            let wait = http?.value(forHTTPHeaderField: "retry-after").flatMap(Double.init) ?? 900
+            backoffUntil = Date().addingTimeInterval(wait)
+            let reason = (String(data: data.prefix(300), encoding: .utf8) ?? "")
+                .replacingOccurrences(of: "\n", with: " ")
+            lastDiagnosis = "http 429, waiting \(Int(wait))s — \(reason)"
+            return nil
+        }
         guard code == 200, let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             lastDiagnosis = "http \(code)"; return nil
         }
+        backoffUntil = .distantPast
         guard let q = parse(obj) else {
             lastDiagnosis = "unexpected fields: \(obj.keys.sorted().prefix(8).joined(separator: ","))"
             return nil

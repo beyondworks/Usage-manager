@@ -12,7 +12,9 @@ final class AppModel: ObservableObject {
     @Published var sessions: [SessionCtx] = []
 
     private var fileLimits: [ToolKind: Limit] = [:]   // statusLine/rollout fallback
-    private var liveQuotas: [ProviderQuota] = []       // opencodex, wins per provider
+    // Kept per provider so one source failing (rate limit, proxy down) leaves the other
+    // rows — and that provider's last good value — on screen instead of blanking it.
+    private var liveQuotas: [String: ProviderQuota] = [:]
     private var lastQuotaFetch = Date.distantPast
     /// Demo snapshots must never be overwritten by a real scan (the view refreshes on
     /// appear), so both refresh paths become no-ops once sample data is loaded.
@@ -88,17 +90,23 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Pull live quotas from opencodex (throttled to once per 90 s unless forced), then
-    /// merge. Zero LLM tokens — it reads the proxy's cached JSON over localhost.
+    /// Pull live quotas (throttled to once per 5 min unless forced), then merge. Limits
+    /// move slowly, and the usage endpoint rate-limits a caller that asks too often.
     func refreshQuotas(force: Bool = false) {
         guard !demo else { return }
-        guard force || Date().timeIntervalSince(lastQuotaFetch) > 90 else { return }
+        guard force || Date().timeIntervalSince(lastQuotaFetch) > 300 else { return }
         lastQuotaFetch = Date()
         Task.detached(priority: .utility) {
             async let proxy = OpenCodex.fetchQuotas()      // openai, kimi, …
             async let claude = ClaudeUsage.fetch()         // anthropic, from the live session
             let live = await proxy + [await claude].compactMap { $0 }
-            await MainActor.run { self.liveQuotas = live; self.rebuildQuotas() }
+            let note = "quota fetch — " + (live.isEmpty ? "none" : live.map { "\($0.provider) \(Int($0.weeklyPercent ?? -1))%" }.joined(separator: " "))
+                + " · claude: " + ClaudeUsage.lastDiagnosis
+            await MainActor.run {
+                for q in live { self.liveQuotas[q.provider] = q }   // keep the last good value per provider
+                self.rebuildQuotas()
+                Self.log(note)
+            }
         }
     }
 
@@ -110,7 +118,7 @@ final class AppModel: ObservableObject {
             byId[tool.provider] = ProviderQuota(provider: tool.provider, weeklyPercent: l.percent,
                                                 fiveHourPercent: nil, resetsAt: l.resetsAt, updatedAt: l.updatedAt)
         }
-        for q in liveQuotas { byId[q.provider] = q }
+        for (id, q) in liveQuotas { byId[id] = q }
         let ordered = ProviderMeta.sorted(Array(byId.values))
         if quotas != ordered { quotas = ordered }
     }
@@ -182,6 +190,26 @@ final class AppModel: ObservableObject {
         ]
         tools = [.claudeCode, .codex]
         hooks = Hooks.Status(claude: true, codex: true, codexTrusted: true)
+    }
+
+    /// One line per limit lookup in `~/.usage-manager/usage.log`, so the poll interval
+    /// and any rate-limit back-off can be checked after the fact. Truncated at 64 KB.
+    static func log(_ text: String) {
+        let path = Paths.root + "/usage.log"
+        let stamp = ISO8601DateFormatter().string(from: Date())
+        let line = "\(stamp) \(text)\n"
+        let fm = FileManager.default
+        if let size = (try? fm.attributesOfItem(atPath: path))?[.size] as? Int, size > 64_000 {
+            try? fm.removeItem(atPath: path)
+        }
+        guard let fh = FileHandle(forWritingAtPath: path) else {
+            try? fm.createDirectory(atPath: Paths.root, withIntermediateDirectories: true)
+            try? line.write(toFile: path, atomically: true, encoding: .utf8)
+            return
+        }
+        defer { try? fh.close() }
+        _ = try? fh.seekToEnd()
+        try? fh.write(contentsOf: Data(line.utf8))
     }
 
     func setHooks(_ on: Bool) {
