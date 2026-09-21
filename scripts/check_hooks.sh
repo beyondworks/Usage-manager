@@ -118,8 +118,22 @@ touch "$T/.usage-manager/armed/$GSID"
 held=0
 for _ in $(seq 1 12); do [ "$(gate "$GSID")" = 2 ] && held=$((held+1)); done
 [ "$held" -le 8 ] || fail "gate held $held times, past the cap"
+[ "$held" -eq 8 ] || fail "expected the full 8-hold budget, got $held"
 [ "$held" -ge 1 ] || fail "gate never held at all"
 [ "$(gate "$GSID")" = 0 ] || fail "gate still holding after giving up"
+
+# a second cycle must hold again: leftovers from the first must not trip the give-up
+# rule (an old .since made the gate give up on its first try — every compaction after
+# the first went through without a handover).
+touch "$T/.usage-manager/armed/$GSID"
+[ "$(gate "$GSID")" = 2 ] || fail "second cycle: first hold missing"
+touch "$T/.usage-manager/pressed/$GSID"
+[ "$(gate "$GSID")" = 0 ] || fail "second cycle: marker ignored"
+[ -z "$(ls "$T/.usage-manager/holds/" 2>/dev/null)" ] || fail "counters left after pass: $(ls "$T/.usage-manager/holds/")"
+# an arming older than the time budget gives up at once (that is the point of the cap)
+touch -t "$(date -v-20M +%Y%m%d%H%M)" "$T/.usage-manager/armed/$GSID"
+[ "$(gate "$GSID")" = 0 ] || fail "an arming past the time budget should stop holding"
+rm -f "$T/.usage-manager/armed/$GSID" "$T/.usage-manager/holds/$GSID"*
 
 # the compaction point is written as the threshold, and removed on uninstall
 python3 -c "import json,sys;d=json.load(open(sys.argv[1]));sys.exit(0 if d.get('env',{}).get('CLAUDE_AUTOCOMPACT_PCT_OVERRIDE') else 1)" "$T/.claude/settings.json" \

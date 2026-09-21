@@ -83,15 +83,15 @@ public enum Hooks {
       echo "$(date -u +%FT%TZ) $sid pass" >> "$root/gate.log"
       exit 0
     fi
-    # Give up rather than let the window fill to a hard limit error.
+    # Give up rather than let the window fill to a hard limit error. The arming file's
+    # own timestamp is the start of this cycle — no separate timer file to go stale.
     mkdir -p "$root/holds"
     n=$(cat "$root/holds/$sid" 2>/dev/null || echo 0)
-    first=$(cat "$root/holds/$sid.since" 2>/dev/null || echo "")
     now=$(date +%s)
-    [ -n "$first" ] || { first=$now; echo "$first" > "$root/holds/$sid.since"; }
+    first=$(stat -f %m "$root/armed/$sid" 2>/dev/null || echo "$now")
     n=$((n + 1)); echo "$n" > "$root/holds/$sid"
-    if [ "$n" -ge \(maxHolds) ] || [ $((now - first)) -ge \(maxHoldSeconds) ]; then
-      rm -f "$root/holds/$sid" "$root/holds/$sid.since" "$root/armed/$sid"
+    if [ "$n" -gt \(maxHolds) ] || [ $((now - first)) -ge \(maxHoldSeconds) ]; then
+      rm -f "$root/holds/$sid" "$root/armed/$sid"
       echo "$(date -u +%FT%TZ) $sid give-up after $n holds" >> "$root/gate.log"
       exit 0
     fi
@@ -260,8 +260,14 @@ public enum Hooks {
     /// handover marker appears. Only sessions the app actually alerted are armed.
     public static func arm(sessionId: String) {
         guard sessionId.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "-" }) else { return }
-        try? FileManager.default.createDirectory(atPath: Paths.root + "/armed", withIntermediateDirectories: true)
-        FileManager.default.createFile(atPath: Paths.root + "/armed/" + sessionId, contents: nil)
+        let fm = FileManager.default
+        try? fm.createDirectory(atPath: Paths.root + "/armed", withIntermediateDirectories: true)
+        // Clear any counters left by an earlier cycle, so this session gets the full
+        // hold budget again rather than tripping the give-up rule immediately.
+        for leftover in ["/holds/\(sessionId)", "/pressed/\(sessionId)"] {
+            try? fm.removeItem(atPath: Paths.root + leftover)
+        }
+        fm.createFile(atPath: Paths.root + "/armed/" + sessionId, contents: nil)
     }
 
     private static func isOurs(_ group: [String: Any]) -> Bool {
