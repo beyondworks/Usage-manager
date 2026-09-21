@@ -117,7 +117,7 @@ swift build -c release            # 빌드
 scripts/make_release.sh           # dist/ 에 DMG 2종
 scripts/check_hooks.sh            # 자체검사 (임시 홈에서 훅 설치·전달·복원)
 .build/debug/UsageManager --dump  # 읽어 들인 한도·세션·훅 상태 출력
-.build/debug/UsageManager --arm-check  # 압축 보류를 압축보다 먼저 거는지 확인
+.build/debug/UsageManager --arm-check  # 예고 알림이 압축 지점보다 먼저 나가는지 확인
 ```
 
 `--dump`는 앱이 실제로 무엇을 읽었는지 그대로 보여준다. 화면과 다르면 여기서부터 확인하면 된다.
