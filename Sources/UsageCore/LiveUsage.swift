@@ -53,11 +53,6 @@ public struct SessionCtx: Sendable, Identifiable, Equatable {
     public func armTokens(pct: Int) -> Int {
         compactionTokens(pct: pct) - min(30_000, effectiveWindow / 20)
     }
-    /// Past this, holding a compaction risks a hard limit error instead of a compaction
-    /// (a reactive compaction after such an error arrives as `auto` too), so the app
-    /// disarms the gate rather than letting it block.
-    public var hardTokens: Int { effectiveWindow - 13_000 }
-
     public init(tool: ToolKind = .claudeCode, sessionId: String, project: String, title: String? = nil,
                 model: String, ctxTokens: Int, windowSize: Int, mtime: Date) {
         self.tool = tool; self.sessionId = sessionId; self.project = project; self.title = title
@@ -249,6 +244,19 @@ public final class LiveScanner: @unchecked Sendable {
     public struct ClaudeTail: Sendable {
         public let ctxTokens: Int; public let model: String
         let cwd: String; let title: String?; public let entrypoint: String?
+        /// Characters of tool-result text queued since that `usage` was reported — what
+        /// the next request will carry on top of it. The gate needs the size of the
+        /// request about to go out, not the one that last came back: five parallel reads
+        /// can queue 100 KB, which is how a session crosses its limit between two
+        /// measurements. Parallel calls are logged as several assistant lines carrying
+        /// the *same* usage, so this counts from the first of them, not the last.
+        public let trailingChars: Int
+
+        /// Two measured rounds came out at 4.0 and 2.7 characters per token, so no
+        /// constant here is accurate — the ratio depends on what the tools returned.
+        /// Three sits between them, and the ceiling this feeds is set wide enough that
+        /// being wrong by half still errs towards releasing the compaction.
+        public var nextRequestTokens: Int { ctxTokens + trailingChars / 3 }
     }
 
     /// Backward pass over the last 256 KB: latest assistant `usage`, cwd, entrypoint,
@@ -257,20 +265,44 @@ public final class LiveScanner: @unchecked Sendable {
         guard let data = FileTail.read(path: path) else { return nil }
         var cwd = "", title: String?, entrypoint: String?
         var hit: (ctx: Int, model: String)?
+        var trailing = 0, queued = 0
         for line in data.split(separator: 0x0A, omittingEmptySubsequences: true).reversed() {
             guard let obj = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any] else { continue }
+            queued += contentChars(obj)
             if cwd.isEmpty, let c = obj["cwd"] as? String { cwd = c }
             if entrypoint == nil, let ep = obj["entrypoint"] as? String { entrypoint = ep }
             if title == nil, obj["type"] as? String == "custom-title",
                let ct = obj["customTitle"] as? String, !ct.isEmpty { title = ct }
-            if hit == nil, let msg = obj["message"] as? [String: Any], let u = msg["usage"] as? [String: Any] {
+            if let msg = obj["message"] as? [String: Any], let u = msg["usage"] as? [String: Any] {
                 let ctx = int(u["input_tokens"]) + int(u["cache_read_input_tokens"]) + int(u["cache_creation_input_tokens"])
-                if ctx > 0 { hit = (ctx, (msg["model"] as? String) ?? "claude") }
+                if ctx > 0 {
+                    // A parallel round is logged as several assistant lines carrying the
+                    // same usage, so keep walking back through them: everything between
+                    // them is queued for the next request. An older, different usage ends
+                    // the round.
+                    if let h = hit, ctx != h.ctx { break }
+                    hit = (ctx, (msg["model"] as? String) ?? "claude")
+                    trailing = queued
+                }
             }
-            if hit != nil, title != nil, entrypoint != nil, !cwd.isEmpty { break }
         }
         guard let hit else { return nil }
-        return ClaudeTail(ctxTokens: hit.ctx, model: hit.model, cwd: cwd, title: title, entrypoint: entrypoint)
+        return ClaudeTail(ctxTokens: hit.ctx, model: hit.model, cwd: cwd, title: title,
+                          entrypoint: entrypoint, trailingChars: trailing)
+    }
+
+    /// Text carried by one transcript line — tool results and message text. A line that
+    /// reports its own `usage` is a response already counted in it, so it contributes
+    /// nothing to what the next request adds.
+    private static func contentChars(_ obj: [String: Any]) -> Int {
+        guard let msg = obj["message"] as? [String: Any], msg["usage"] == nil else { return 0 }
+        func chars(_ any: Any?) -> Int {
+            if let s = any as? String { return s.count }
+            if let list = any as? [Any] { return list.reduce(0) { $0 + chars($1) } }
+            if let d = any as? [String: Any] { return chars(d["text"]) + chars(d["content"]) }
+            return 0
+        }
+        return chars(msg["content"])
     }
 
     /// Context window: statusLine snapshot (authoritative) → `[1m]` model / observed

@@ -111,6 +111,12 @@ transcript() {  # transcript <tokens> [entrypoint]
   printf '{"type":"assistant","entrypoint":"%s","cwd":"/tmp/demo","message":{"model":"claude-opus-5","usage":{"input_tokens":10,"cache_read_input_tokens":%s}}}\n' \
     "${2:-cli}" "$1" > "$TR"
 }
+queued() {  # queued <tokens> <chars> — a parallel round: one usage, results after it
+  { printf '{"type":"assistant","entrypoint":"cli","cwd":"/tmp/demo","message":{"model":"claude-opus-5","usage":{"input_tokens":10,"cache_read_input_tokens":%s}}}\n' "$1"
+    printf '{"type":"user","message":{"content":[{"type":"tool_result","content":"%s"}]}}\n' "$(head -c "$2" /dev/zero | tr '\0' 'x')"
+    printf '{"type":"assistant","entrypoint":"cli","cwd":"/tmp/demo","message":{"model":"claude-opus-5","usage":{"input_tokens":10,"cache_read_input_tokens":%s}}}\n' "$1"
+  } > "$TR"
+}
 gate() {  # gate <session-id> -> exit status
   printf '{"session_id":"%s","hook_event_name":"PreCompact","trigger":"auto","transcript_path":"%s"}' "$1" "$TR" \
     | HOME="$T" /bin/sh "$T/.usage-manager/bin/precompact-gate.sh" >/dev/null 2>&1; echo $?
@@ -118,7 +124,7 @@ gate() {  # gate <session-id> -> exit status
 
 # a session the app never saw is held anyway, and the gate writes the notice itself
 rm -f "$T/.usage-manager/alerts/$GSID.txt"
-transcript 800000
+transcript 900000
 [ "$(gate "$GSID")" = 2 ] || fail "gate did not hold an automatic compaction"
 [ -f "$T/.usage-manager/alerts/$GSID.txt" ] || fail "gate held without leaving a notice"
 grep -q 'SESSION_HANDOVER' "$T/.usage-manager/alerts/$GSID.txt" || fail "gate notice lacks the handover step"
@@ -134,20 +140,38 @@ touch "$T/.usage-manager/pressed/$GSID"
 # a second cycle must hold again
 [ "$(gate "$GSID")" = 2 ] || fail "second cycle: not held"
 
-# at the hard limit the gate lets go: holding there produces an error, not a compaction,
-# and the reactive compaction that follows one arrives as `auto` too. Judged against this
-# session's own first measurement, so no guess at the window size is involved.
-transcript 806000
-[ "$(gate "$GSID")" = 2 ] || fail "released early — 6k above the first hold is not the limit"
-transcript 815000
-[ "$(gate "$GSID")" = 0 ] || fail "still holding 15k above the first hold"
+# At the hard limit the gate lets go. Holding there produces an error rather than a
+# compaction, and the reactive compaction that follows one arrives as `auto` too — so
+# blocking it stops the session for good: nothing calls the gate again to release it.
+transcript 960000
+[ "$(gate "$GSID")" = 2 ] || fail "released below the ceiling"
+transcript 985000
+[ "$(gate "$GSID")" = 0 ] || fail "still holding above the ceiling"
 [ -z "$(ls "$T/.usage-manager/holds/" 2>/dev/null)" ] || fail "counters left after releasing at the limit"
+
+# Parallel calls: the results already queued belong to the request about to go out, and
+# a single round of them can carry a session over the limit. They are logged as several
+# assistant lines sharing one usage, so counting only from the last one misses them --
+# which is how a session stopped dead behind a hold it could not clear.
+queued 960000 90000   # 960k reported, ~30k more queued in tool results
+[ "$(gate "$GSID")" = 0 ] || fail "queued tool results were not counted towards the next request"
+[ -z "$(ls "$T/.usage-manager/holds/" 2>/dev/null)" ] || fail "counters left after releasing"
+
+# ...and the same session without that queue is still held
+transcript 960000
+[ "$(gate "$GSID")" = 2 ] || fail "held nothing once the queue was gone"
+rm -f "$T/.usage-manager/holds/$GSID"
+
+# a session already over the limit on the very first PreCompact is never held at all
+transcript 985000
+[ "$(gate "$GSID")" = 0 ] || fail "first hold on an over-limit session"
+[ ! -f "$T/.usage-manager/holds/$GSID" ] || fail "over-limit session left a hold counter"
 
 # never hold forever. The cap has to outlast a real handover, which spends well over a
 # dozen tool calls (the gate is retried on each one).
 # (Giving up starts a fresh cycle rather than latching: by then the compaction it let
 # through has run, so the next PreCompact is a genuinely new one.)
-transcript 800000
+transcript 900000
 held=0
 while [ "$(gate "$GSID")" = 2 ]; do
   held=$((held+1))
@@ -156,18 +180,18 @@ done
 [ "$held" -eq 40 ] || fail "expected the full 40-hold budget, got $held"
 
 # the time budget runs from the first hold
-transcript 800000
+transcript 900000
 [ "$(gate "$GSID")" = 2 ] || fail "new cycle: not held"
 set -- $(cat "$T/.usage-manager/holds/$GSID")   # "attempts first-hold opening-tokens"
 echo "$1 $(( $2 - 1200 )) $3" > "$T/.usage-manager/holds/$GSID"
 [ "$(gate "$GSID")" = 0 ] || fail "holding past the time budget"
 
 # nobody is watching a headless run, so it is never held
-transcript 800000 sdk-cli
+transcript 900000 sdk-cli
 [ "$(gate "$GSID")" = 0 ] || fail "headless session was held"
 
 # the alerts switch reaches the gate without the app running
-transcript 800000
+transcript 900000
 touch "$T/.usage-manager/gate-off"
 [ "$(gate "$GSID")" = 0 ] || fail "alerts off but the compaction was still held"
 rm -f "$T/.usage-manager/gate-off" "$T/.usage-manager/holds/$GSID"

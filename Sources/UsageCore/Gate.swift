@@ -23,12 +23,25 @@ public enum Gate {
     static let maxHolds = 40
     static let maxSeconds: Double = 600
 
-    /// Claude Code compacts at least 13k tokens below the hard limit. A session that has
-    /// grown by that much since the first hold is therefore at the limit itself, where
-    /// holding would produce an error instead of a compaction — including the reactive
-    /// compaction that follows such an error, which arrives as `auto` too. Comparing
-    /// against the session's own first measurement needs no guess at the window size.
-    static let headroom = 13_000
+    /// Where holding stops being safe. Claude Code keeps 20k of the window for output,
+    /// so a request may grow to about `window - 20000`; past that it fails instead of
+    /// compacting — and the reactive compaction that follows such a failure arrives as
+    /// `auto` too, so blocking it leaves the session with no way forward at all. It just
+    /// stops, and the gate is never called again to release it. Hence this check runs on
+    /// the first hold as much as on later ones.
+    ///
+    /// Bracketed by measurement, in a 200k window (effective 180k): a compaction at
+    /// 171,597 tokens succeeded, and a request of 186,464 failed. Replaying both moments
+    /// through this estimator gave 166,338 and 182,250 — within 3% of each, and low in
+    /// both cases. The 10k step back is twice that error, so a misjudgement releases a
+    /// compaction that could have been held rather than blocking one that had to run.
+    ///
+    /// An earlier version compared against the session's own first measurement, to avoid
+    /// guessing the window at all. That was wrong: the gap between the compaction point
+    /// and the limit is `effective × (1 - pct)`, not a constant, so at 70% it let go with
+    /// 40k still to spare — before the agent had taken a single turn.
+    static let outputReserve = 20_000
+    static let estimateMargin = 10_000
 
     public static func decide(input: Data, now: Date = Date()) -> Decision {
         let (sid, d) = evaluate(input: input, now: now)
@@ -59,12 +72,15 @@ public enum Gate {
         let tail = LiveScanner.claudeTail(path: (obj["transcript_path"] as? String) ?? "")
         if let ep = tail?.entrypoint, ep.hasPrefix("sdk") { return (sid, .pass("headless session")) }
 
-        let ctx = tail?.ctxTokens ?? 0
-        var s = state(sid) ?? Held(n: 0, first: now.timeIntervalSince1970, ctx: ctx)
-        if ctx > 0, s.ctx > 0, ctx >= s.ctx + headroom {
+        // The size of the request about to go out, not the one that last came back.
+        let ctx = tail?.nextRequestTokens ?? 0
+        let window = windowSize(sid: sid, tail: tail)
+        let ceiling = window - outputReserve - estimateMargin
+        if ctx >= ceiling {
             clear(sid)
-            return (sid, .pass("at the hard limit (\(ctx) tokens, \(ctx - s.ctx) past the first hold)"))
+            return (sid, .pass("at the hard limit (\(ctx) tokens, ceiling \(ceiling) in a \(window) window)"))
         }
+        var s = state(sid) ?? Held(n: 0, first: now.timeIntervalSince1970, ctx: ctx)
         s.n += 1
         if s.n > maxHolds || now.timeIntervalSince1970 - s.first >= maxSeconds {
             clear(sid)
@@ -74,6 +90,24 @@ public enum Gate {
         // Once per cycle: `ctx-hook.sh` hands it over on the session's next tool call.
         if s.n == 1 { Hooks.queueNotice(sessionId: sid, text: notice(sid: sid)) }
         return (sid, .hold("hold \(s.n) (\(ctx) tokens)"))
+    }
+
+    /// Context window, best source first:
+    /// 1. the statusLine snapshot, which carries the real number;
+    /// 2. a model that names its own 1M window;
+    /// 3. a session already past 200k, which a 200k window cannot be;
+    /// 4. otherwise 200k — the smaller guess, which releases the gate earlier and so
+    ///    never leaves a session stuck behind a hold it cannot clear.
+    static func windowSize(sid: String, tail: LiveScanner.ClaudeTail?) -> Int {
+        if let data = FileManager.default.contents(atPath: Paths.claudeStatus + "/\(sid).json"),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let cw = obj["context_window"] as? [String: Any],
+           let size = (cw["context_window_size"] as? NSNumber)?.intValue, size > 0 {
+            return size
+        }
+        if tail?.model.contains("[1m]") == true { return 1_000_000 }
+        if (tail?.ctxTokens ?? 0) > 200_000 { return 1_000_000 }
+        return 200_000
     }
 
     public static func notice(sid: String) -> String {
