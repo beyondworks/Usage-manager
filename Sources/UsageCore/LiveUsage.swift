@@ -252,17 +252,19 @@ public final class LiveScanner: @unchecked Sendable {
         /// the *same* usage, so this counts from the first of them, not the last.
         public let trailingChars: Int
 
-        /// Two measured rounds came out at 4.0 and 2.7 characters per token, so no
-        /// constant here is accurate — the ratio depends on what the tools returned.
-        /// Three sits between them, and the ceiling this feeds is set wide enough that
-        /// being wrong by half still errs towards releasing the compaction.
+        /// Two measured rounds came out at 4.0 and 2.7 ASCII characters per token, so
+        /// no constant here is exact — the ratio depends on what the tools returned.
+        /// Three sits between them, and the ceiling this feeds is wide enough that being
+        /// wrong by half still errs towards releasing the compaction. Non-ASCII text is
+        /// counted three times over (see `contentChars`), which brings Korean and other
+        /// multi-byte results to roughly one token per character rather than a third.
         public var nextRequestTokens: Int { ctxTokens + trailingChars / 3 }
     }
 
     /// Backward pass over the last 256 KB: latest assistant `usage`, cwd, entrypoint,
     /// and the newest user-set session name.
-    public static func claudeTail(path: String) -> ClaudeTail? {
-        guard let data = FileTail.read(path: path) else { return nil }
+    public static func claudeTail(path: String, bytes: UInt64 = 256 * 1024) -> ClaudeTail? {
+        guard let data = FileTail.read(path: path, bytes: bytes) else { return nil }
         var cwd = "", title: String?, entrypoint: String?
         var hit: (ctx: Int, model: String)?
         var trailing = 0, queued = 0
@@ -297,7 +299,10 @@ public final class LiveScanner: @unchecked Sendable {
     private static func contentChars(_ obj: [String: Any]) -> Int {
         guard let msg = obj["message"] as? [String: Any], msg["usage"] == nil else { return 0 }
         func chars(_ any: Any?) -> Int {
-            if let s = any as? String { return s.count }
+            // Weight non-ASCII up: a third of a token per character holds for English
+            // prose, but Korean runs closer to one, and underestimating here is what
+            // leaves a session held at its limit.
+            if let s = any as? String { return s.unicodeScalars.reduce(0) { $0 + ($1.isASCII ? 1 : 3) } }
             if let list = any as? [Any] { return list.reduce(0) { $0 + chars($1) } }
             if let d = any as? [String: Any] { return chars(d["text"]) + chars(d["content"]) }
             return 0

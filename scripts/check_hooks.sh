@@ -186,6 +186,65 @@ set -- $(cat "$T/.usage-manager/holds/$GSID")   # "attempts first-hold opening-t
 echo "$1 $(( $2 - 1200 )) $3" > "$T/.usage-manager/holds/$GSID"
 [ "$(gate "$GSID")" = 0 ] || fail "holding past the time budget"
 
+# Nothing may outlive the compaction it belonged to. A notice still sitting in the
+# queue is delivered after the compaction, the agent writes the marker in good faith,
+# and the *next* compaction is then waved through on a handover from the cycle before.
+transcript 900000
+[ "$(gate "$GSID")" = 2 ] || fail "setup: expected a hold"
+transcript 985000
+[ "$(gate "$GSID")" = 0 ] || fail "setup: expected a release at the limit"
+[ ! -f "$T/.usage-manager/alerts/$GSID.txt" ] || fail "notice outlived the compaction it belonged to"
+[ ! -f "$T/.usage-manager/holds/$GSID" ] || fail "counter outlived the compaction"
+
+# ...and a marker with no cycle behind it means nothing
+touch "$T/.usage-manager/pressed/$GSID"
+transcript 900000
+[ "$(gate "$GSID")" = 2 ] || fail "a stale marker waved the next compaction through"
+[ ! -f "$T/.usage-manager/pressed/$GSID" ] || fail "stale marker not discarded"
+rm -f "$T/.usage-manager/holds/$GSID" "$T/.usage-manager/alerts/$GSID.txt"
+
+# A subagent's hooks carry its parent's session id. Holding there, or spending the
+# parent's notice and marker, would let the parent compact with no handover of its own.
+rm -f "$T/.usage-manager/holds/$GSID" "$T/.usage-manager/alerts/$GSID.txt"
+transcript 900000
+sub=$(printf '{"session_id":"%s","agent_id":"agent-1","hook_event_name":"PreCompact","trigger":"auto","transcript_path":"%s"}' "$GSID" "$TR" \
+  | HOME="$T" /bin/sh "$T/.usage-manager/bin/precompact-gate.sh" >/dev/null 2>&1; echo $?)
+[ "$sub" = 0 ] || fail "a subagent compaction was held on the parent's behalf"
+[ ! -f "$T/.usage-manager/holds/$GSID" ] || fail "subagent opened a cycle on the parent's id"
+[ ! -f "$T/.usage-manager/alerts/$GSID.txt" ] || fail "subagent queued a notice on the parent's id"
+# ...and the prompt hook leaves the parent's notice alone
+arm '"parent notice"'
+out=$(printf '{"session_id":"%s","agent_id":"agent-1","hook_event_name":"PostToolUse"}' "$SID" \
+  | HOME="$T" /bin/sh "$T/.usage-manager/bin/ctx-hook.sh")
+[ -z "$out" ] || fail "subagent consumed the parent's notice: $out"
+[ -f "$T/.usage-manager/alerts/$SID.txt" ] || fail "subagent deleted the parent's notice"
+rm -f "$T/.usage-manager/alerts/$SID.txt"
+
+# One big tool result can fill the tail on its own; the session is still measurable
+# further back, and holding blind at the limit is what strands a session.
+{ printf '{"type":"assistant","entrypoint":"cli","cwd":"/tmp/demo","message":{"model":"claude-opus-5","usage":{"input_tokens":10,"cache_read_input_tokens":700000}}}\n'
+  printf '{"type":"user","message":{"content":[{"type":"tool_result","content":"%s"}]}}\n' "$(head -c 300000 /dev/zero | tr '\0' 'x')"
+} > "$TR"
+[ "$(gate "$GSID")" = 2 ] || fail "gave up on a session whose usage sits past the usual tail"
+grep -q 'hold 1 (800010 tokens)' "$T/.usage-manager/gate.log" || fail "measured the deep usage wrongly: $(tail -1 "$T/.usage-manager/gate.log")"
+rm -f "$T/.usage-manager/holds/$GSID" "$T/.usage-manager/alerts/$GSID.txt"
+
+# no usage anywhere: measuring is impossible, so release rather than hold blind
+printf '{"type":"user","message":{"content":"nothing measurable here"}}\n' > "$TR"
+[ "$(gate "$GSID")" = 0 ] || fail "held a session it could not measure"
+
+# The budget runs from the moment the notice reaches the agent, not from the hold: an
+# agent cannot act on a notice it has not been given.
+transcript 900000
+[ "$(gate "$GSID")" = 2 ] || fail "budget setup: expected a hold"
+set -- $(cat "$T/.usage-manager/holds/$GSID")
+echo "$1 $(( $2 - 540 )) $3" > "$T/.usage-manager/holds/$GSID"   # 9 minutes in
+probe "$GSID" PostToolUse | grep -q 'SESSION_HANDOVER' || fail "budget setup: notice not delivered"
+set -- $(cat "$T/.usage-manager/holds/$GSID")
+[ $(( $(date +%s) - $2 )) -lt 60 ] || fail "delivering the notice did not restart the budget"
+[ "$(gate "$GSID")" = 2 ] || fail "budget expired although the notice had just arrived"
+rm -f "$T/.usage-manager/holds/$GSID" "$T/.usage-manager/alerts/$GSID.txt"
+
 # nobody is watching a headless run, so it is never held
 transcript 900000 sdk-cli
 [ "$(gate "$GSID")" = 0 ] || fail "headless session was held"

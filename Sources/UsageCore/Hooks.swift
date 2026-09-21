@@ -54,12 +54,23 @@ public enum Hooks {
     # when the user sends no message. The alert file holds a bare JSON string; the event
     # name comes from stdin so the same file serves either hook.
     \(readSid)
+    # A subagent's hooks carry its parent's session_id; the notice is the parent's to
+    # receive, so leave it where it is rather than spending it inside a subagent.
+    printf '%s' "$in" | plutil -extract agent_id raw -o - - >/dev/null 2>&1 && exit 0
     ev=$(printf '%s' "$in" | sed -n 's/.*"hook_event_name"[[:space:]]*:[[:space:]]*"\\([A-Za-z]*\\)".*/\\1/p')
     [ -n "$ev" ] || ev=UserPromptSubmit
     f="$HOME/.usage-manager/alerts/$sid.txt"
     [ -n "$sid" ] && [ -f "$f" ] || exit 0
     printf '{"hookSpecificOutput":{"hookEventName":"%s","additionalContext":%s}}\\n' "$ev" "$(cat "$f")"
     rm -f "$f"
+    # The hold budget starts here, not when the gate first blocked: the agent cannot act
+    # on a notice it had not been given, and a user who stepped away for ten minutes
+    # would otherwise come back to an expired one.
+    h="$HOME/.usage-manager/holds/$sid"
+    if [ -f "$h" ]; then
+      set -- $(cat "$h")
+      [ -n "$3" ] && echo "$1 $(date +%s) $3" > "$h"
+    fi
     exit 0
 
     """

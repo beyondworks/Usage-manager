@@ -58,36 +58,59 @@ public enum Gate {
               sid.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "-" })
         else { return ("?", .pass("no session id")) }
 
-        let fm = FileManager.default
-        if fm.fileExists(atPath: Paths.root + "/gate-off") { return (sid, .pass("alerts off")) }
+        // A subagent's compaction carries its parent's session_id, so anything this gate
+        // did with it — a hold, a notice, the marker — would be spent on the parent's
+        // behalf without the parent ever compacting. `agent_id` marks those, and they
+        // are left entirely alone: no state touched, nothing cleared.
+        if obj["agent_id"] != nil { return (sid, .pass("subagent")) }
 
-        let pressed = Paths.root + "/pressed/" + sid
-        if fm.fileExists(atPath: pressed) {
-            try? fm.removeItem(atPath: pressed)
-            clear(sid)
-            return (sid, .pass("handover written"))
+        if FileManager.default.fileExists(atPath: Paths.root + "/gate-off") {
+            clear(sid); return (sid, .pass("alerts off"))
         }
 
         // Nobody is watching a headless run, so a notice there is not actionable.
-        let tail = LiveScanner.claudeTail(path: (obj["transcript_path"] as? String) ?? "")
-        if let ep = tail?.entrypoint, ep.hasPrefix("sdk") { return (sid, .pass("headless session")) }
+        // One big tool result can fill the usual tail on its own, so when no usage is
+        // in reach, look further back before giving up on measuring the session.
+        let path = (obj["transcript_path"] as? String) ?? ""
+        var tail = LiveScanner.claudeTail(path: path)
+        if tail == nil || tail!.ctxTokens == 0 { tail = LiveScanner.claudeTail(path: path, bytes: 8 << 20) }
+        if let ep = tail?.entrypoint, ep.hasPrefix("sdk") { clear(sid); return (sid, .pass("headless session")) }
+
+        // No usage in reach means no idea how large this session is, and holding blind
+        // is what strands a session: if it is already at its limit, the reactive
+        // compaction would be held too, and nothing would call this gate again.
+        guard let tail, tail.ctxTokens > 0 else {
+            clear(sid); return (sid, .pass("no usage found in the transcript"))
+        }
+
+        // The marker only means something inside a cycle this gate opened. Left over
+        // from a cycle that ended some other way, it would wave through the next
+        // compaction on the strength of the previous one's handover.
+        let held = state(sid)
+        let pressed = Paths.root + "/pressed/" + sid
+        if FileManager.default.fileExists(atPath: pressed) {
+            if held != nil { clear(sid); return (sid, .pass("handover written")) }
+            try? FileManager.default.removeItem(atPath: pressed)
+        }
 
         // The size of the request about to go out, not the one that last came back.
-        let ctx = tail?.nextRequestTokens ?? 0
+        let ctx = tail.nextRequestTokens
         let window = windowSize(sid: sid, tail: tail)
         let ceiling = window - outputReserve - estimateMargin
         if ctx >= ceiling {
             clear(sid)
             return (sid, .pass("at the hard limit (\(ctx) tokens, ceiling \(ceiling) in a \(window) window)"))
         }
-        var s = state(sid) ?? Held(n: 0, first: now.timeIntervalSince1970, ctx: ctx)
+        var s = held ?? Held(n: 0, first: now.timeIntervalSince1970, ctx: ctx)
         s.n += 1
         if s.n > maxHolds || now.timeIntervalSince1970 - s.first >= maxSeconds {
             clear(sid)
             return (sid, .pass("budget spent after \(s.n - 1) holds"))
         }
         write(sid, s)
-        // Once per cycle: `ctx-hook.sh` hands it over on the session's next tool call.
+        // Once per cycle: `ctx-hook.sh` hands it over on the session's next tool call,
+        // and restarts the budget from that moment — the agent cannot act on a notice
+        // it has not been given yet.
         if s.n == 1 { Hooks.queueNotice(sessionId: sid, text: notice(sid: sid)) }
         return (sid, .hold("hold \(s.n) (\(ctx) tokens)"))
     }
@@ -124,8 +147,8 @@ public enum Gate {
         """
         ① 작업 폴더의 SESSION_HANDOVER.md 를 갱신합니다(목표·결정·진행 상황·미검증 항목·다음 단계·처리 중인 요청).
         ② obsidian-save 로 AI-Sessions-Vault 에 저장합니다(lint 와 push 까지 마칩니다).
-        ③ 둘 다 끝난 뒤 마지막에 `touch ~/.usage-manager/pressed/\(sid)` 만 실행하면 압축이 이어집니다. \
-        /compact 를 직접 실행하거나 사용자에게 안내하지 마세요.
+        ③ ②의 push 까지 끝난 것을 확인한 뒤, 마지막으로 `touch ~/.usage-manager/pressed/\(sid)` 를 \
+        실행하면 압축이 이어집니다. /compact 를 직접 실행하거나 사용자에게 안내하지 마세요.
         """
     }
 
@@ -166,5 +189,12 @@ public enum Gate {
         try? "\(s.n) \(Int(s.first)) \(s.ctx)".write(toFile: file(sid), atomically: true, encoding: .utf8)
     }
 
-    static func clear(_ sid: String) { try? FileManager.default.removeItem(atPath: file(sid)) }
+    /// End the cycle completely. A notice or marker left behind outlives the compaction
+    /// it belonged to and is then spent on the next one.
+    static func clear(_ sid: String) {
+        let fm = FileManager.default
+        for p in [file(sid), Paths.root + "/pressed/" + sid, Paths.alerts + "/\(sid).txt"] {
+            try? fm.removeItem(atPath: p)
+        }
+    }
 }
