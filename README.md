@@ -86,8 +86,6 @@ Usage Manager는 이 둘을 한 화면에 올린다. 메뉴바 아이콘 하나,
 > xattr -dr com.apple.quarantine "/Applications/Usage Manager.app"
 > ```
 
-**macOS 전용이다.** 메뉴바 앱, 파일 감시, 로그인 항목 등록 모두 macOS 프레임워크 위에 있어서 다른 OS로 옮기려면 다시 만들어야 한다.
-
 ## 에이전트 훅 연결
 
 팝오버의 **에이전트 훅** 스위치를 켜면 알림이 에이전트에게 닿는 경로가 설치된다.
