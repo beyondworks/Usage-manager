@@ -1,0 +1,23 @@
+# SwiftPM build output
+.build/
+.swiftpm/
+Package.resolved
+
+# Generated icon artifacts (rebuilt by scripts/make_icon.swift)
+build/
+AppIcon.icns
+*.iconset
+
+# Packaged app bundle / disk image (build artifacts)
+*.app/
+*.dmg
+
+# macOS
+.DS_Store
+
+# Local verification captures (the README image is tracked)
+*.png
+!docs/*.png
+
+# Release artifacts
+dist/
