@@ -1,4 +1,5 @@
 import Foundation
+import Security
 
 /// Claude's own subscription usage — the numbers the desktop app shows under
 /// "플랜 사용량 한도".
@@ -20,22 +21,39 @@ public enum ClaudeUsage {
     /// reinstalled and relaunched often, and a back-off that only lived in memory meant
     /// every restart fired a request into a limit that was still in force.
     private static var backoffFile: String { Paths.root + "/claude-backoff" }
-    private nonisolated(unsafe) static var backoffCache: Date?
+    private nonisolated(unsafe) static var backoffCache: (until: Date, token: String)?
 
-    public static var backoffUntil: Date {
+    /// Stored as "<epoch> <token fingerprint>". The fingerprint is what lets a limit
+    /// earned by an expired token stop applying once a fresh one appears — that limit
+    /// was the old token's doing, and the new one deserves its own attempt.
+    private static var backoff: (until: Date, token: String) {
         get {
-            if let d = backoffCache { return d }
-            let stored = (try? String(contentsOfFile: backoffFile, encoding: .utf8))
-                .flatMap { Double($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
-                .map { Date(timeIntervalSince1970: $0) } ?? .distantPast
-            backoffCache = stored
-            return stored
+            if let b = backoffCache { return b }
+            let parts = ((try? String(contentsOfFile: backoffFile, encoding: .utf8)) ?? "")
+                .split(whereSeparator: \.isWhitespace).map(String.init)
+            let b = (Date(timeIntervalSince1970: parts.first.flatMap(Double.init) ?? 0),
+                     parts.count > 1 ? parts[1] : "")
+            backoffCache = b
+            return b
         }
         set {
             backoffCache = newValue
+            guard newValue.until > Date() else {
+                try? FileManager.default.removeItem(atPath: backoffFile); return
+            }
             try? FileManager.default.createDirectory(atPath: Paths.root, withIntermediateDirectories: true)
-            try? String(Int(newValue.timeIntervalSince1970)).write(toFile: backoffFile, atomically: true, encoding: .utf8)
+            try? "\(Int(newValue.until.timeIntervalSince1970)) \(newValue.token)"
+                .write(toFile: backoffFile, atomically: true, encoding: .utf8)
         }
+    }
+
+    public static var backoffUntil: Date { backoff.until }
+
+    /// A short, non-reversible stand-in for a token, safe to write to disk and logs.
+    static func fingerprint(_ token: String) -> String {
+        var h: UInt64 = 0xcbf29ce484222325
+        for b in token.utf8 { h = (h ^ UInt64(b)) &* 0x100000001b3 }
+        return String(h, radix: 16)
     }
 
     /// The token that worked last time, tried first so a good one is not re-discovered
@@ -44,11 +62,16 @@ public enum ClaudeUsage {
 
     public static func fetch() async -> ProviderQuota? {
         guard !Paths.offline else { lastDiagnosis = "offline"; return nil }
-        if Date() < backoffUntil {
-            lastDiagnosis = "rate-limited, retrying in \(Int(backoffUntil.timeIntervalSinceNow))s"
-            return nil
+        var tokens = allTokens()
+        let held = backoff
+        if Date() < held.until {
+            // A limit the *current* token never earned should not hold it back.
+            if let first = tokens.first, fingerprint(first) == held.token {
+                lastDiagnosis = "rate-limited, retrying in \(Int(held.until.timeIntervalSinceNow))s"
+                return nil
+            }
+            lastDiagnosis = "rate-limited on an older token; trying the current one"
         }
-        var tokens = sessionTokens()
         if let good = knownGood, let i = tokens.firstIndex(of: good) {
             tokens.remove(at: i); tokens.insert(good, at: 0)
         }
@@ -61,13 +84,13 @@ public enum ClaudeUsage {
             switch await ask(token: token) {
             case .ok(let q):
                 knownGood = token
-                backoffUntil = .distantPast
+                backoff = (.distantPast, "")
                 lastDiagnosis = "ok"
                 return q
             case .expired:
                 rejected += 1
             case .limited(let wait, let reason):
-                backoffUntil = Date().addingTimeInterval(wait)
+                backoff = (Date().addingTimeInterval(wait), fingerprint(token))
                 lastDiagnosis = "http 429, waiting \(Int(wait))s — \(reason)"
                 return nil
             case .other(let why):
@@ -78,7 +101,7 @@ public enum ClaudeUsage {
         // Every token we can see is expired. Asking again in five minutes is what turned
         // this into a rate limit last time, so wait before looking for a fresher one.
         knownGood = nil
-        backoffUntil = Date().addingTimeInterval(600)
+        backoff = (Date().addingTimeInterval(600), tokens.first.map(fingerprint) ?? "")
         lastDiagnosis = "http 401 on \(rejected) token(s) — waiting 600s for a fresh session"
         return nil
     }
@@ -95,6 +118,9 @@ public enum ClaudeUsage {
                              timeoutInterval: 8)
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         req.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
+        // The endpoint rate-limits unknown callers harder than it does Claude Code
+        // itself, which is what several usage tools found before this one.
+        req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
         guard let (data, resp) = try? await URLSession.shared.data(for: req) else {
             return .other("network error")
         }
@@ -138,6 +164,72 @@ public enum ClaudeUsage {
         let f = ISO8601DateFormatter()
         f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return f.date(from: s) ?? ISO8601DateFormatter().date(from: s)
+    }
+
+    /// `claude-code/<version>`, read once from the installed CLI.
+    private nonisolated(unsafe) static var uaCache: String?
+    static var userAgent: String {
+        if let ua = uaCache { return ua }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        p.arguments = ["claude", "--version"]
+        let out = Pipe(); p.standardOutput = out; p.standardError = Pipe()
+        var version = "2.1.141"
+        if (try? p.run()) != nil {
+            let data = out.fileHandleForReading.readDataToEndOfFile()
+            p.waitUntilExit()
+            if let text = String(data: data, encoding: .utf8),
+               let m = text.range(of: #"\d+\.\d+\.\d+"#, options: .regularExpression) {
+                version = String(text[m])
+            }
+        }
+        let ua = "claude-code/" + version
+        uaCache = ua
+        return ua
+    }
+
+    /// Where to look for a usable token, best first.
+    ///
+    /// The keychain holds the one Claude Code keeps refreshed, so it is almost always
+    /// valid. The process list holds whatever each running session started with, and
+    /// the older of those have expired — reading those first is what produced a day of
+    /// 401s, and then the rate limit they earned.
+    static func allTokens() -> [String] {
+        var found: [String] = []
+        if let k = keychainToken() { found.append(k) }
+        for t in credentialsFileTokens() where !found.contains(t) { found.append(t) }
+        for t in sessionTokens() where !found.contains(t) { found.append(t) }
+        return found
+    }
+
+    static func keychainToken() -> String? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: "Claude Code-credentials",
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+        var item: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
+              let data = item as? Data else { return nil }
+        return oauthToken(in: data)
+    }
+
+    /// Same shape, for installs that keep it in a file instead.
+    static func credentialsFileTokens() -> [String] {
+        guard let data = FileManager.default.contents(atPath: Paths.home + "/.claude/.credentials.json"),
+              let t = oauthToken(in: data) else { return [] }
+        return [t]
+    }
+
+    private static func oauthToken(in data: Data) -> String? {
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let oauth = obj["claudeAiOauth"] as? [String: Any],
+              let token = oauth["accessToken"] as? String, token.count > 20 else { return nil }
+        // An expired token is worse than none: it is what answers 401 in a loop.
+        if let ms = (oauth["expiresAt"] as? NSNumber)?.doubleValue,
+           Date(timeIntervalSince1970: ms / 1000) <= Date() { return nil }
+        return token
     }
 
     /// Pull the OAuth token out of a live `claude` process's environment (same user).
