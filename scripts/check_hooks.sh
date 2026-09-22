@@ -91,6 +91,21 @@ printf '%s\n' "$boundary" >> "$comp"
 printf '%s\n%s\n' "$boundary" "$boundary" >> "$comp"
 [ "$(count_shown)" = 3 ] || fail "three compactions reported as $(count_shown)"
 
+# Clearing is suggested once compacting again stops paying: at the user's own count, or
+# earlier if the summary itself has swollen. Both read from the transcript.
+clear_shown() { HOME="$T" USAGE_MANAGER_COMPACT_LIMIT="$1" "$BIN" --dump | sed -n 's/.*clear=\([a-z]*\).*/\1/p' | head -1; }
+# three compactions have been appended above
+[ "$(clear_shown 4)" = false ] || fail "clear suggested below the limit"
+[ "$(clear_shown 3)" = true ] || fail "clear not suggested at the limit"
+[ "$(clear_shown 2)" = true ] || fail "clear not suggested past the limit"
+
+# ...and a swollen summary suggests it early, whatever the count
+printf '%s\n' '{"type":"system","subtype":"compact_boundary","compactMetadata":{"trigger":"auto","postTokens":50000}}' >> "$comp"
+[ "$(clear_shown 9)" = true ] || fail "a 50k summary did not suggest clearing on its own"
+printf '%s\n' '{"type":"system","subtype":"compact_boundary","compactMetadata":{"trigger":"auto","postTokens":20000}}' >> "$comp"
+[ "$(clear_shown 9)" = false ] || fail "a later, smaller summary still suggested clearing"
+
+
 # the hand-written tally in a session name is dropped from the label, not from the title
 python3 - "$comp" <<'EOF'
 import json, sys
@@ -275,6 +290,21 @@ transcript 900000
 touch "$T/.usage-manager/gate-off"
 [ "$(gate "$GSID")" = 0 ] || fail "alerts off but the compaction was still held"
 rm -f "$T/.usage-manager/gate-off" "$T/.usage-manager/holds/$GSID"
+
+# What to suggest depends on whether the gate let the last compaction through *because*
+# the handover was written. The gate records that as it passes.
+handover_shown() { HOME="$T" "$BIN" --dump | sed -n 's/.*handover=\([a-z]*\).*/\1/p' | head -1; }
+[ "$(handover_shown)" = false ] || fail "handover claimed with no record of one"
+mkdir -p "$T/.usage-manager/pressed" "$T/.usage-manager/holds"
+transcript 900000
+[ "$(gate "$SID2")" = 2 ] || fail "handover record: expected a hold"
+touch "$T/.usage-manager/pressed/$SID2"
+[ "$(gate "$SID2")" = 0 ] || fail "handover record: marker ignored"
+[ "$(cat "$T/.usage-manager/lastpass/$SID2" 2>/dev/null)" = handover ] || fail "the gate did not record the handover"
+[ "$(handover_shown)" = true ] || fail "the app did not read the gate's handover record"
+transcript 985000
+[ "$(gate "$SID2")" = 0 ] || fail "handover record: expected a release at the limit"
+[ "$(handover_shown)" = false ] || fail "a compaction at the limit was reported as handed over"
 
 # the compaction point is written as the threshold, and removed on uninstall
 python3 -c "import json,sys;d=json.load(open(sys.argv[1]));sys.exit(0 if d.get('env',{}).get('CLAUDE_AUTOCOMPACT_PCT_OVERRIDE') else 1)" "$T/.claude/settings.json" \

@@ -95,8 +95,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for q in ProviderMeta.sorted(Array(byId.values)) {
             print("quota \(ProviderMeta.name(q.provider)) [\(q.provider)]: weekly=\(q.weeklyPercent.map{String(Int($0))} ?? "-")% 5h=\(q.fiveHourPercent.map{String(Int($0))} ?? "-")% resets=\(q.resetsAt.map{"\($0)"} ?? "-")")
         }
+        // The popover's own yardstick, overridable here so a replay can be checked at a
+        // different one without touching the user's setting.
+        let limit = ProcessInfo.processInfo.environment["USAGE_MANAGER_COMPACT_LIMIT"].flatMap(Int.init)
+            ?? max(1, UserDefaults.standard.object(forKey: "compactLimit") as? Int ?? 3)
+        print("compactLimit:", limit)
         for s in snap.sessions {
-            print("session \(s.tool.display) \(s.label) \(Int(s.usedPercent))% \(s.ctxTokens)/\(s.windowSize) \(s.model) compactions=\(s.compactions) idle=\(s.isIdle)")
+            print("session \(s.tool.display) \(s.label) \(Int(s.usedPercent))% \(s.ctxTokens)/\(s.windowSize) \(s.model) compactions=\(s.compactions) post=\(s.lastPostTokens) handover=\(s.handoverSaved) clear=\(s.needsClear(limit: limit)) idle=\(s.isIdle)")
         }
         print("hooks:", Hooks.status())
     }

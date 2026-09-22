@@ -46,10 +46,25 @@ public enum Gate {
     public static func decide(input: Data, now: Date = Date()) -> Decision {
         let (sid, d) = evaluate(input: input, now: now)
         switch d {
-        case .pass(let why): log("\(sid) pass — \(why)")
-        case .hold(let why): log("\(sid) \(why)")
+        case .pass(let why):
+            log("\(sid) pass — \(why)")
+            // Remember whether the compaction about to run had a handover behind it, so
+            // the app can tell "saved, safe to clear" from "clearing would lose this".
+            recordPass(sid, handover: why == handoverReason)
+        case .hold(let why):
+            log("\(sid) \(why)")
         }
         return d
+    }
+
+    static let handoverReason = "handover written"
+
+    /// One word per session, outliving the cycle it describes.
+    private static func recordPass(_ sid: String, handover: Bool) {
+        guard sid != "?" else { return }
+        let dir = Paths.root + "/lastpass"
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        try? (handover ? "handover" : "other").write(toFile: dir + "/" + sid, atomically: true, encoding: .utf8)
     }
 
     private static func evaluate(input: Data, now: Date) -> (String, Decision) {
@@ -89,7 +104,7 @@ public enum Gate {
         let held = state(sid)
         let pressed = Paths.root + "/pressed/" + sid
         if FileManager.default.fileExists(atPath: pressed) {
-            if held != nil { clear(sid); return (sid, .pass("handover written")) }
+            if held != nil { clear(sid); return (sid, .pass(handoverReason)) }
             try? FileManager.default.removeItem(atPath: pressed)
         }
 

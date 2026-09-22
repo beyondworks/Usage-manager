@@ -44,7 +44,7 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private struct CtxState { var armed = true; var lastNotified = Date.distantPast }
+    private struct CtxState { var armed = true; var lastNotified = Date.distantPast; var clearPushed = false }
     private var ctxState: [String: CtxState] = [:]
 
     private var watcher: FileWatcher?
@@ -164,6 +164,17 @@ final class AppModel: ObservableObject {
             } else if s.ctxTokens < arm - arm / 10 {
                 st.armed = true
             }
+            // Compacting again buys little and costs accuracy, so say so once per
+            // session. The app only suggests it — clearing is the user's to do.
+            if alertsOn, !st.clearPushed, s.needsClear(limit: compactLimit) {
+                st.clearPushed = true
+                Notifier.shared.fire(
+                    title: "\(s.label) 압축 \(s.compactions)회",
+                    body: s.handoverSaved
+                        ? "핸드오버 저장됨. clear 하거나 새 세션에서 핸드오버 문서와 옵시디언을 참조해 이어 가세요."
+                        : "핸드오버가 저장되지 않았을 수 있습니다. /raw-press 로 먼저 저장한 뒤 clear 하세요.",
+                    id: "clear-\(s.sessionId)")
+            }
             ctxState[s.sessionId] = st
         }
         let active = Set(sessions.map(\.sessionId))
@@ -214,7 +225,8 @@ final class AppModel: ObservableObject {
         sessions = [
             SessionCtx(tool: .claudeCode, sessionId: "demo01", project: "storefront",
                        title: "결제 리팩터링", model: "claude-opus-5",
-                       ctxTokens: 871_000, windowSize: 1_000_000, mtime: now, compactions: 3),
+                       ctxTokens: 871_000, windowSize: 1_000_000, mtime: now, compactions: 3,
+                       lastPostTokens: 38_000, handoverSaved: true),
             SessionCtx(tool: .claudeCode, sessionId: "demo02", project: "api-gateway",
                        model: "claude-opus-5", ctxTokens: 486_000, windowSize: 1_000_000, mtime: now, compactions: 1),
             SessionCtx(tool: .codex, sessionId: "demo03", project: "infra",

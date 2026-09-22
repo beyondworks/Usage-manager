@@ -23,6 +23,10 @@ public struct SessionCtx: Sendable, Identifiable, Equatable {
     /// How many times this transcript has been compacted. Claude Code only — Codex
     /// rollouts record no compaction event.
     public let compactions: Int
+    /// What the most recent compaction left behind, and whether a handover was written
+    /// before it ran (the gate records that as it lets the compaction through).
+    public let lastPostTokens: Int
+    public let handoverSaved: Bool
 
     public var usedPercent: Double { windowSize > 0 ? Double(ctxTokens) / Double(windowSize) * 100 : 0 }
     public var hasContext: Bool { windowSize > 0 }
@@ -40,6 +44,20 @@ public struct SessionCtx: Sendable, Identifiable, Equatable {
     /// The count used to be written into the session name by hand ("Argo - 총괄 (0/3)"),
     /// so that tail is dropped from what is displayed now that the app supplies it. The
     /// session's own title is never modified.
+    /// Compacting again buys almost nothing and costs accuracy. Across 142 compactions
+    /// of 1M-window sessions, the space left afterwards barely moved — a median of
+    /// 31,233 tokens after the first, 39,891 after the fifth — while each one replaced
+    /// about 940,000 tokens with a 30,000-token summary, and later ones summarise
+    /// summaries. So past a few rounds the session is better restarted from its handover
+    /// than compacted again.
+    ///
+    /// `limit` is the user's own yardstick; the second test catches a session whose
+    /// summary has swollen well past the usual size before it gets there.
+    public static let swollenSummary = 45_000
+    public func needsClear(limit: Int) -> Bool {
+        compactions > 0 && (compactions >= limit || lastPostTokens >= Self.swollenSummary)
+    }
+
     public var label: String {
         let raw = title ?? project
         guard let r = raw.range(of: #"\s*\(\s*\d+\s*/\s*\d+\s*\)\s*$"#, options: .regularExpression)
@@ -66,10 +84,12 @@ public struct SessionCtx: Sendable, Identifiable, Equatable {
         compactionTokens(pct: pct) - min(30_000, effectiveWindow / 20)
     }
     public init(tool: ToolKind = .claudeCode, sessionId: String, project: String, title: String? = nil,
-                model: String, ctxTokens: Int, windowSize: Int, mtime: Date, compactions: Int = 0) {
+                model: String, ctxTokens: Int, windowSize: Int, mtime: Date, compactions: Int = 0,
+                lastPostTokens: Int = 0, handoverSaved: Bool = false) {
         self.tool = tool; self.sessionId = sessionId; self.project = project; self.title = title
         self.model = model; self.ctxTokens = ctxTokens; self.windowSize = windowSize; self.mtime = mtime
         self.compactions = compactions
+        self.lastPostTokens = lastPostTokens; self.handoverSaved = handoverSaved
     }
 }
 
@@ -96,7 +116,7 @@ public final class LiveScanner: @unchecked Sendable {
     private var recent: [String: Date] = [:]               // session log → mtime, within window
     private var parsed: [String: (size: UInt64, s: SessionCtx?)] = [:]
     private var human: [String: (offset: UInt64, yes: Bool)] = [:]
-    private var compacted: [String: (offset: UInt64, count: Int)] = [:]
+    private var compacted: [String: (offset: UInt64, count: Int, post: Int)] = [:]
     private var claudeWeekly: Limit?
     private var codexWeekly: Limit?
     private var lastFull = Date.distantPast
@@ -213,11 +233,13 @@ public final class LiveScanner: @unchecked Sendable {
         }
         guard let t = Self.claudeTail(path: path) else { return nil }
         let sid = String((path as NSString).lastPathComponent.dropLast(6))
+        let c = compactionScan(path: path)
         guard isHumanAttended(entrypoint: t.entrypoint, path: path) else { return nil }
         return SessionCtx(tool: .claudeCode, sessionId: sid, project: Self.projectLabel(t.cwd), title: t.title,
                           model: t.model, ctxTokens: t.ctxTokens,
                           windowSize: claudeWindow(sid: sid, model: t.model, ctx: t.ctxTokens), mtime: .distantPast,
-                          compactions: compactionCount(path: path))
+                          compactions: c.count, lastPostTokens: c.postTokens,
+                          handoverSaved: Self.handoverSaved(sid: sid))
     }
 
     /// Only human-attended sessions belong in the list. Transcript `entrypoint`:
@@ -261,12 +283,12 @@ public final class LiveScanner: @unchecked Sendable {
     /// largest here, 47 MB), then only what has been appended since.
     private static let compactMarker = Data(#""subtype":"compact_boundary""#.utf8)
 
-    private func compactionCount(path: String) -> Int {
-        var st = compacted[path] ?? (0, 0)
-        guard let fh = FileHandle(forReadingAtPath: path) else { return st.count }
+    private func compactionScan(path: String) -> (count: Int, postTokens: Int) {
+        var st = compacted[path] ?? (0, 0, 0)
+        guard let fh = FileHandle(forReadingAtPath: path) else { return (st.count, st.post) }
         defer { try? fh.close() }
         let size = (try? fh.seekToEnd()) ?? 0
-        if size < st.offset { st = (0, 0) }   // replaced or truncated: count again
+        if size < st.offset { st = (0, 0, 0) }   // replaced or truncated: count again
         if st.offset < size {
             try? fh.seek(toOffset: st.offset)
             var buf = Data()
@@ -276,19 +298,40 @@ public final class LiveScanner: @unchecked Sendable {
                 // still seen whole, and counted once.
                 guard let nl = buf.lastIndex(of: 0x0A) else { continue }
                 let whole = Data(buf[buf.startIndex...nl])
-                st.count += Self.occurrences(of: Self.compactMarker, in: whole)
+                let found = Self.markers(in: whole)
+                st.count += found.count
+                if found.count > 0 { st.post = found.post }
                 st.offset += UInt64(whole.count)
                 buf = Data(buf[(nl + 1)...])
             }
         }
         compacted[path] = st
-        return st.count
+        return (st.count, st.post)
     }
 
-    private static func occurrences(of needle: Data, in hay: Data) -> Int {
-        var n = 0, from = hay.startIndex
-        while let r = hay.range(of: needle, in: from..<hay.endIndex) { n += 1; from = r.upperBound }
-        return n
+    /// Compaction boundaries in one chunk, and what the last of them left behind.
+    private static func markers(in hay: Data) -> (count: Int, post: Int) {
+        var n = 0, post = 0, from = hay.startIndex
+        while let r = hay.range(of: compactMarker, in: from..<hay.endIndex) {
+            n += 1
+            from = r.upperBound
+            let lineStart = hay[hay.startIndex..<r.lowerBound].lastIndex(of: 0x0A)
+                .map { hay.index(after: $0) } ?? hay.startIndex
+            let lineEnd = hay[r.upperBound...].firstIndex(of: 0x0A) ?? hay.endIndex
+            if let obj = try? JSONSerialization.jsonObject(with: Data(hay[lineStart..<lineEnd])) as? [String: Any],
+               let meta = obj["compactMetadata"] as? [String: Any] {
+                post = int(meta["postTokens"])
+            }
+        }
+        return (n, post)
+    }
+
+    /// Did the gate let this session's last compaction through *because* the handover
+    /// had been written? Anything else — the hard limit, a spent budget — means the
+    /// session may have been compacted with nothing saved.
+    static func handoverSaved(sid: String) -> Bool {
+        (try? String(contentsOfFile: Paths.root + "/lastpass/" + sid, encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines) == "handover"
     }
 
     /// Also read by the PreCompact gate, which needs the same two facts (size, and
@@ -389,6 +432,7 @@ public final class LiveScanner: @unchecked Sendable {
 private extension SessionCtx {
     func with(mtime: Date) -> SessionCtx {
         SessionCtx(tool: tool, sessionId: sessionId, project: project, title: title, model: model,
-                   ctxTokens: ctxTokens, windowSize: windowSize, mtime: mtime, compactions: compactions)
+                   ctxTokens: ctxTokens, windowSize: windowSize, mtime: mtime, compactions: compactions,
+                   lastPostTokens: lastPostTokens, handoverSaved: handoverSaved)
     }
 }
