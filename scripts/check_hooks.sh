@@ -342,6 +342,22 @@ transcript 900000
 [ "$(gate "$GSID")" = 2 ] || fail "a marker eight hours old was accepted"
 rm -f "$T/.usage-manager/holds/$GSID" "$T/.usage-manager/alerts/$GSID.txt" "$T/.usage-manager/warned/$GSID"
 
+# The warning is only a guess at where this session compacts — a session started before
+# the setting took effect compacts much later and can run a long way past it. The
+# handover behind the marker is then old, whatever its timestamp says.
+echo 830000 > "$T/.usage-manager/warned/$GSID"
+touch "$T/.usage-manager/pressed/$GSID"
+transcript 900000
+[ "$(gate "$GSID")" = 2 ] || fail "a handover written 70k tokens ago was accepted"
+rm -f "$T/.usage-manager/holds/$GSID" "$T/.usage-manager/alerts/$GSID.txt"
+
+# ...while a session that acted on its warning arrives well inside that distance.
+echo 880000 > "$T/.usage-manager/warned/$GSID"
+touch "$T/.usage-manager/pressed/$GSID"
+transcript 900000
+[ "$(gate "$GSID")" = 0 ] || fail "a session that acted on its warning was held"
+rm -f "$T/.usage-manager/holds/$GSID" "$T/.usage-manager/alerts/$GSID.txt" "$T/.usage-manager/warned/$GSID"
+
 # A subagent's hooks carry its parent's session id. Holding there, or spending the
 # parent's notice and marker, would let the parent compact with no handover of its own.
 rm -f "$T/.usage-manager/holds/$GSID" "$T/.usage-manager/alerts/$GSID.txt"

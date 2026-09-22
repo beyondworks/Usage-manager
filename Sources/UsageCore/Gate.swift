@@ -108,18 +108,27 @@ public enum Gate {
         // Both markers are anchored to something a compaction erases, so neither can be
         // spent twice: `clear` removes the hold, the warning and the marker together, and
         // every path that releases a compaction calls it.
+        // The size of the request about to go out, not the one that last came back.
+        let ctx = tail.nextRequestTokens
+
         let held = state(sid)
         let pressed = Paths.root + "/pressed/" + sid
         if let at = mtime(pressed) {
             if held != nil { clear(sid); return (sid, .pass(handoverReason)) }
             if let warned = mtime(warning(sid)), at >= warned, now.timeIntervalSince(at) < staleMarker {
-                clear(sid); return (sid, .pass(handoverReason + " ahead of the warning"))
+                // The app's warning is a guess at where this session compacts, drawn from
+                // the threshold the user set; a session started before that setting took
+                // effect compacts much later and can run a long way past its warning. The
+                // handover behind the marker describes the session as it was then.
+                let grew = ctx - (warnedAt(sid) ?? ctx)
+                if grew < staleTokens {
+                    clear(sid); return (sid, .pass(handoverReason + " ahead of the warning"))
+                }
+                log("\(sid) marker set \(grew) tokens ago — holding for a fresher handover")
             }
             try? FileManager.default.removeItem(atPath: pressed)
         }
 
-        // The size of the request about to go out, not the one that last came back.
-        let ctx = tail.nextRequestTokens
         let window = windowSize(sid: sid, tail: tail)
         let ceiling = window - outputReserve - estimateMargin
         if ctx >= ceiling {
@@ -233,14 +242,23 @@ public enum Gate {
 
     /// Called when the app tells a session its compaction point is near, so the gate can
     /// tell a marker written in answer to that warning from one left over.
-    public static func recordWarning(sessionId sid: String) {
+    public static func recordWarning(sessionId sid: String, tokens: Int) {
         let dir = Paths.root + "/warned"
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-        let path = dir + "/" + sid
-        if !FileManager.default.createFile(atPath: path, contents: nil) {
-            try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: path)
-        }
+        try? "\(tokens)".write(toFile: dir + "/" + sid, atomically: true, encoding: .utf8)
     }
+
+    /// How large the session was when it was warned, or nil if it never was.
+    static func warnedAt(_ sid: String) -> Int? {
+        (try? String(contentsOfFile: warning(sid), encoding: .utf8)).flatMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+    }
+
+    /// How far a session may run past its warning and still be let through on the
+    /// handover it wrote then. The warning goes out `min(30000, effective/20)` before
+    /// the compaction point, so a session that acted on it arrives well inside this;
+    /// one that is only now reaching the point after a much earlier warning has done
+    /// work its handover does not describe, and is held so it can add it.
+    static let staleTokens = 50_000
 
     static func mtime(_ path: String) -> Date? {
         (try? FileManager.default.attributesOfItem(atPath: path))?[.modificationDate] as? Date
