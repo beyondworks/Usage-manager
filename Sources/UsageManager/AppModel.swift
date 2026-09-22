@@ -16,6 +16,13 @@ final class AppModel: ObservableObject {
     // rows — and that provider's last good value — on screen instead of blanking it.
     private var liveQuotas: [String: ProviderQuota] = [:]
     private var lastQuotaFetch = Date.distantPast
+    /// When the next automatic lookup is due, and the guard against hammering the
+    /// button. The endpoint rate-limits a caller that asks too often, and the limit it
+    /// applies lasts far longer than the time saved by asking early.
+    @Published var nextQuotaFetch = Date()
+    private var lastManualFetch = Date.distantPast
+    static let quotaInterval: TimeInterval = 300
+    static let manualInterval: TimeInterval = 60
     /// Demo snapshots must never be overwritten by a real scan (the view refreshes on
     /// appear), so both refresh paths become no-ops once sample data is loaded.
     private var demo = false
@@ -115,8 +122,9 @@ final class AppModel: ObservableObject {
     /// move slowly, and the usage endpoint rate-limits a caller that asks too often.
     func refreshQuotas(force: Bool = false) {
         guard !demo else { return }
-        guard force || Date().timeIntervalSince(lastQuotaFetch) > 300 else { return }
+        guard force || Date().timeIntervalSince(lastQuotaFetch) > Self.quotaInterval else { return }
         lastQuotaFetch = Date()
+        nextQuotaFetch = lastQuotaFetch.addingTimeInterval(Self.quotaInterval)
         Task.detached(priority: .utility) {
             async let proxy = OpenCodex.fetchQuotas()      // openai, kimi, …
             async let claude = ClaudeUsage.fetch()         // anthropic, from the live session
@@ -129,6 +137,21 @@ final class AppModel: ObservableObject {
                 Self.log(note)
             }
         }
+    }
+
+    /// A lookup asked for by hand. Rate-limited providers are skipped by their own
+    /// back-off, so this never extends a limit that is already in force.
+    func refreshNow() {
+        guard Date().timeIntervalSince(lastManualFetch) > Self.manualInterval else { return }
+        lastManualFetch = Date()
+        refreshQuotas(force: true)
+    }
+
+    var manualReady: Bool { Date().timeIntervalSince(lastManualFetch) > Self.manualInterval }
+
+    /// How long Claude's own limit still has to run, if it is in force.
+    var claudeWait: TimeInterval {
+        max(0, ClaudeUsage.backoffUntil.timeIntervalSinceNow)
     }
 
     /// Merge the file-based fallback with the live opencodex quotas (live wins per

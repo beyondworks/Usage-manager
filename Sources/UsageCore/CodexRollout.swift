@@ -119,6 +119,14 @@ enum FileTail {
 }
 
 extension TimeUtil {
+    /// How old a reading is, in the same words everywhere it appears.
+    public static func ageText(_ at: Date) -> String {
+        let age = Date().timeIntervalSince(at)
+        if age < 60 { return "방금" }
+        if age < 3600 { return "\(Int(age / 60))분 전" }
+        return "\(Int(age / 3600))시간 전"
+    }
+
     static let isoFrac: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter(); f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]; return f
     }()

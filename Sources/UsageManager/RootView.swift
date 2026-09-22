@@ -134,6 +134,7 @@ struct RootView: View {
             Image(nsImage: PillIcon.image(height: 20, template: false))
             Text("Usage Manager").font(.system(size: 15, weight: .bold))
             Spacer()
+            refreshRing
             circleButton(model.launchAtLogin ? "sunrise.fill" : "sunrise", on: model.launchAtLogin,
                          help: model.launchAtLogin ? "로그인 시 자동 실행: 켬" : "로그인 시 자동 실행: 끔") {
                 model.setLaunchAtLogin(!model.launchAtLogin)
@@ -157,6 +158,38 @@ struct RootView: View {
             Text(title).font(.system(size: 11, weight: .bold)).foregroundStyle(.white.opacity(0.55))
                 .padding(.leading, 6)
             content()
+        }
+    }
+
+    /// Time to the next automatic lookup, as a ring that empties — and the button that
+    /// asks now. A provider already rate-limited is skipped by its own back-off, so
+    /// pressing this cannot extend a limit; the ring says so instead of hiding it.
+    private var refreshRing: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { ctx in
+            let wait = model.claudeWait
+            let limited = wait > 0
+            let left = max(0, model.nextQuotaFetch.timeIntervalSince(ctx.date))
+            let ratio = limited ? 1 : min(1, left / AppModel.quotaInterval)
+            Button { model.refreshNow() } label: {
+                ZStack {
+                    Circle().stroke(.white.opacity(0.14), lineWidth: 2)
+                    Circle().trim(from: 0, to: ratio)
+                        .stroke(.white.opacity(limited ? 0.3 : 0.7),
+                                style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                        .rotationEffect(.degrees(-90))
+                    if limited {
+                        Image(systemName: "exclamationmark").font(.system(size: 8, weight: .heavy))
+                            .foregroundStyle(.white.opacity(0.6))
+                    }
+                }
+                .frame(width: 22, height: 22)
+                .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .opacity(model.manualReady ? 1 : 0.45)
+            .help(limited
+                  ? "Claude 조회 제한 — 약 \(Int((wait / 60).rounded()))분 뒤 재시도. 지금 누르면 나머지만 조회합니다"
+                  : "다음 조회까지 \(Int((left / 60).rounded()))분 · 눌러서 지금 조회")
         }
     }
 
@@ -187,6 +220,9 @@ struct RootView: View {
                     .contentTransition(.numericText())
                     .animation(.ui, value: left)
             }
+            // An hour-old number is still shown, but dimmed: it is the age that matters
+            // once a provider stops answering, not the number.
+            .opacity(Date().timeIntervalSince(q.updatedAt) >= 3600 ? 0.5 : 1)
         }
     }
 
@@ -197,9 +233,8 @@ struct RootView: View {
         if let five = q.fiveHourPercent { parts.append("5시간 \(Int((100 - five).rounded()))%") }
         let reset = TimeUtil.resetText(q.resetsAt)
         if !reset.isEmpty { parts.append("리셋 \(reset)") }
-        let age = Date().timeIntervalSince(q.updatedAt)
-        if age > 600 { parts.append(age >= 3600 ? "\(Int(age / 3600))시간 전" : "\(Int(age / 60))분 전") }
-        return parts.isEmpty ? "주간 잔량" : parts.joined(separator: " · ")
+        parts.append(TimeUtil.ageText(q.updatedAt))
+        return parts.joined(separator: " · ")
     }
 
     // MARK: Active sessions
