@@ -261,6 +261,9 @@ struct RootView: View {
             ToolLogo.view(s.tool, size: 16)
             Text(s.label).font(.system(size: 12, weight: .medium)).lineLimit(1)
         } trailing: {
+            // Prompt cache: cheap to re-read while it lasts, and the whole context is
+            // written again once it lapses. Stood down when there is a louder signal.
+            if !s.needsClear(limit: model.compactLimit) { cacheBadge(s) }
             // Compactions so far against the yardstick the user works to. Codex records
             // no compaction, so its rows carry no count.
             if s.needsClear(limit: model.compactLimit) {
@@ -285,7 +288,22 @@ struct RootView: View {
         }
         .opacity(s.isIdle ? 0.45 : 1)
         .animation(.ui, value: s.isIdle)
-        .help("\(s.tool.display) · \(s.model) · \(s.ctxTokens.formatted())/\(s.windowSize.formatted()) tokens · 압축 \(s.compactions)회\(s.lastPostTokens > 0 ? " (직전 요약 \(s.lastPostTokens.formatted()) 토큰\(s.handoverSaved == true ? ", 핸드오버 저장됨" : s.handoverSaved == false ? ", 핸드오버 없이 압축됨" : ""))" : "") · \(s.shortId)\(s.isIdle ? " · 유휴" : "")")
+        .help("\(s.tool.display) · \(s.model) · \(s.ctxTokens.formatted())/\(s.windowSize.formatted()) tokens · 캐시 \(s.cacheTTL == 3600 ? "1시간" : s.cacheTTL == 300 ? "5분" : "?")\(s.cacheLeft.map { $0 > 0 ? " · 남음 \(TimeUtil.shortSpan($0))" : " · 만료" } ?? "") · 압축 \(s.compactions)회\(s.lastPostTokens > 0 ? " (직전 요약 \(s.lastPostTokens.formatted()) 토큰\(s.handoverSaved == true ? ", 핸드오버 저장됨" : s.handoverSaved == false ? ", 핸드오버 없이 압축됨" : ""))" : "") · \(s.shortId)\(s.isIdle ? " · 유휴" : "")")
+    }
+
+    /// "캐시 42분" while it holds, "재작성 60만" once it has lapsed — the tokens the next
+    /// message would have to write again. Ticks on its own so the number keeps moving
+    /// between scans.
+    @ViewBuilder private func cacheBadge(_ s: SessionCtx) -> some View {
+        if s.cacheLeft != nil, let at = s.lastReplyAt {
+            TimelineView(.periodic(from: .now, by: 1)) { ctx in
+                let remain = max(0, at.addingTimeInterval(s.cacheTTL).timeIntervalSince(ctx.date))
+                let quiet = remain > 300
+                Text(remain > 0 ? "캐시 \(TimeUtil.shortSpan(remain))" : "재작성 \(TimeUtil.manCount(s.ctxTokens))")
+                    .font(.system(size: 10, weight: quiet ? .regular : .semibold).monospacedDigit())
+                    .foregroundStyle(.white.opacity(quiet ? 0.35 : 0.8))
+            }
+        }
     }
 
     // MARK: Compaction alerts

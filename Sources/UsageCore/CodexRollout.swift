@@ -120,6 +120,20 @@ enum FileTail {
 
 extension TimeUtil {
     /// How old a reading is, in the same words everywhere it appears.
+    /// "42분", "1시간 12분" — short enough to sit inside a row.
+    public static func shortSpan(_ sec: TimeInterval) -> String {
+        let s = Int(sec.rounded())
+        if s < 60 { return "\(s)초" }
+        if s < 3600 { return "\(s / 60)분" }
+        let m = (s % 3600) / 60
+        return m == 0 ? "\(s / 3600)시간" : "\(s / 3600)시간 \(m)분"
+    }
+
+    /// Korean counts read in units of ten thousand.
+    public static func manCount(_ n: Int) -> String {
+        n >= 10_000 ? "\(n / 10_000)만" : "\(n / 1000)천"
+    }
+
     public static func ageText(_ at: Date) -> String {
         let age = Date().timeIntervalSince(at)
         if age < 60 { return "방금" }

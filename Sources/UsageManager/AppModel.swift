@@ -19,7 +19,7 @@ final class AppModel: ObservableObject {
     /// When the next automatic lookup is due, and the guard against hammering the
     /// button. The endpoint rate-limits a caller that asks too often, and the limit it
     /// applies lasts far longer than the time saved by asking early.
-    @Published var nextQuotaFetch = Date()
+    @Published var nextQuotaFetch = Date().addingTimeInterval(quotaInterval)
     private var lastManualFetch = Date.distantPast
     static let quotaInterval: TimeInterval = 300
     static let manualInterval: TimeInterval = 60

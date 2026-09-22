@@ -104,7 +104,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let wait = Int(max(0, ClaudeUsage.backoffUntil.timeIntervalSinceNow))
         print("claude-backoff:", wait > 0 ? "\(wait)s remaining" : "none")
         for s in snap.sessions {
-            print("session \(s.tool.display) \(s.label) \(Int(s.usedPercent))% \(s.ctxTokens)/\(s.windowSize) \(s.model) compactions=\(s.compactions) post=\(s.lastPostTokens) handover=\(s.handoverSaved.map(String.init) ?? "unknown") clear=\(s.needsClear(limit: limit)) idle=\(s.isIdle)")
+            print("session \(s.tool.display) \(s.label) \(Int(s.usedPercent))% \(s.ctxTokens)/\(s.windowSize) \(s.model) cache_ttl=\(Int(s.cacheTTL)) cache_left=\(s.cacheLeft.map { String(Int($0)) } ?? "-") last_ctx=\(s.ctxTokens) compactions=\(s.compactions) post=\(s.lastPostTokens) handover=\(s.handoverSaved.map(String.init) ?? "unknown") clear=\(s.needsClear(limit: limit)) idle=\(s.isIdle)")
         }
         print("hooks:", Hooks.status())
     }
