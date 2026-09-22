@@ -268,6 +268,22 @@ final class AppModel: ObservableObject {
                        ctxTokens: 132_000, windowSize: 1_000_000, mtime: now.addingTimeInterval(-400),
                        cacheTTL: 3600, lastReplyAt: now.addingTimeInterval(-400), titleSource: "meta"),
         ]
+        // The list behaves differently once it runs past five rows, so a snapshot can
+        // ask for a given number of them.
+        if let want = ProcessInfo.processInfo.environment["USAGE_MANAGER_DEMO_ROWS"].flatMap(Int.init) {
+            let names = ["결제 리팩터링", "검색 색인 재구축", "온보딩 문서", "요금제 마이그레이션",
+                         "장바구니 복구", "재고 동기화", "알림 센터", "감사 로그 정리"]
+            sessions = (0..<max(1, want)).map { i in
+                SessionCtx(tool: .claudeCode, sessionId: "demo\(i)", project: "proj\(i)",
+                           title: names[i % names.count], model: "claude-opus-5",
+                           ctxTokens: 880_000 - i * 95_000, windowSize: 1_000_000,
+                           mtime: now.addingTimeInterval(Double(-i) * 30),
+                           compactions: i % 4, lastPostTokens: 31_000 + i * 900,
+                           handoverSaved: i == 0 ? true : nil,
+                           cacheTTL: 3600, lastReplyAt: now.addingTimeInterval(Double(-i) * 420),
+                           titleSource: "meta")
+            }
+        }
         tools = [.claudeCode, .codex]
         hooks = Hooks.Status(claude: true)
     }

@@ -102,6 +102,7 @@ struct RootView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Namespace private var chip
     @State private var contentHeight: CGFloat = 0
+    @State private var scrollY: CGFloat = 0
     private static let thresholds = Array(stride(from: 50, through: 95, by: 5))
 
     var body: some View {
@@ -239,19 +240,68 @@ struct RootView: View {
 
     // MARK: Active sessions
 
+    /// Row geometry, shared by the height and the fade so the two cannot drift apart.
+    private static let rowHeight: CGFloat = 36
+    private static let rowGap: CGFloat = 6
+    private static var rowPitch: CGFloat { rowHeight + rowGap }
+    private static let visibleRows = 5
+    /// How much of the sixth row shows. Enough to read as "there is more below" without
+    /// looking like a row that failed to render.
+    private static var peek: CGFloat { rowHeight * 0.55 }
+    /// Shorter than the peek, so the top of the sixth row is solid before it fades.
+    private static let fadeHeight: CGFloat = 14
+
+    private struct ScrollOffset: PreferenceKey {
+        static let defaultValue: CGFloat = 0
+        static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+    }
+
     @ViewBuilder private var sessions: some View {
         if model.sessions.isEmpty {
             Text("작업 중인 세션 없음").font(.system(size: 12)).foregroundStyle(.white.opacity(0.5))
                 .frame(maxWidth: .infinity, minHeight: 36).background(Self.plate, in: Capsule())
         } else {
+            let count = CGFloat(model.sessions.count)
+            let content = count * Self.rowPitch - Self.rowGap
+            // Past five sessions the list keeps its height and shows part of the next
+            // row, so the list itself says there is more rather than a counter saying it.
+            let height = model.sessions.count <= Self.visibleRows
+                ? content
+                : CGFloat(Self.visibleRows) * Self.rowPitch - Self.rowGap + Self.peek
+            let atTop = scrollY > -2
+            let atBottom = content + scrollY <= height + 2
+
             ScrollView(.vertical, showsIndicators: false) {
-                VStack(spacing: 6) {
+                VStack(spacing: Self.rowGap) {
                     ForEach(model.sessions) { s in
                         sessionRow(s).transition(.scale(scale: 0.95).combined(with: .opacity))
                     }
                 }
+                .background(GeometryReader { g in
+                    Color.clear.preference(key: ScrollOffset.self,
+                                           value: g.frame(in: .named("sessionList")).minY)
+                })
             }
-            .frame(height: min(CGFloat(model.sessions.count), 5) * 42 - 6)
+            .coordinateSpace(name: "sessionList")
+            .onPreferenceChange(ScrollOffset.self) { y in
+                withAnimation(.ui) { scrollY = y }
+            }
+            .frame(height: height)
+            // An alpha mask rather than a colour overlay: the rows themselves fade, so
+            // it reads the same whatever is behind the panel. Each edge appears only
+            // when there is something in that direction.
+            .mask(
+                VStack(spacing: 0) {
+                    LinearGradient(colors: [.clear, .black], startPoint: .top, endPoint: .bottom)
+                        .frame(height: atTop ? 0 : Self.fadeHeight)
+                    Rectangle()
+                    LinearGradient(colors: [.black, .clear], startPoint: .top, endPoint: .bottom)
+                        .frame(height: atBottom ? 0 : Self.fadeHeight)
+                }
+            )
+            .animation(.ui, value: height)
+            .animation(.ui, value: atTop)
+            .animation(.ui, value: atBottom)
         }
     }
 
