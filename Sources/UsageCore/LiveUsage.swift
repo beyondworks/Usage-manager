@@ -335,18 +335,23 @@ public final class LiveScanner: @unchecked Sendable {
         if st.offset < size {
             try? fh.seek(toOffset: st.offset)
             var buf = Data()
-            while let chunk = try? fh.read(upToCount: 1 << 20), !chunk.isEmpty {
+            // One pool per chunk. Counting the boundaries in a 47 MB transcript reads it
+            // a megabyte at a time, and every one of those reads is an autoreleased
+            // object: without a pool here they all stay until the scan returns, which is
+            // most of what the process was holding after a full scan.
+            while autoreleasepool(invoking: { () -> Bool in
+                guard let chunk = try? fh.read(upToCount: 1 << 20), !chunk.isEmpty else { return false }
                 buf.append(chunk)
                 // Hold back the last partial line so a marker split across two reads is
                 // still seen whole, and counted once.
-                guard let nl = buf.lastIndex(of: 0x0A) else { continue }
-                let whole = Data(buf[buf.startIndex...nl])
-                let found = Self.markers(in: whole)
+                guard let nl = buf.lastIndex(of: 0x0A) else { return true }
+                let found = Self.markers(in: buf[buf.startIndex...nl])
                 st.count += found.count
                 if found.count > 0 { st.post = found.post }
-                st.offset += UInt64(whole.count)
+                st.offset += UInt64(buf.distance(from: buf.startIndex, to: nl) + 1)
                 buf = Data(buf[(nl + 1)...])
-            }
+                return true
+            }) {}
         }
         compacted[path] = st
         return (st.count, st.post)

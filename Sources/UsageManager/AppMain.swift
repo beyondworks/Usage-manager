@@ -54,6 +54,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if args.contains("--dump") { dump(); exit(0) }
         if args.contains("--arm-check") { armCheck(); exit(0) }
         if args.contains("--scan-replay") { scanReplay(); exit(0) }
+        if args.contains("--mem") { memReport(); exit(0) }
         if args.contains("--gate") {          // PreCompact(auto): hold, or let it through
             guard case .hold = Gate.decide(input: FileHandle.standardInput.readDataToEndOfFile()) else { exit(0) }
             FileHandle.standardError.write(Data(("Usage Manager: 핸드오버가 저장될 때까지 압축을 미룹니다. "
@@ -119,6 +120,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// after each. This is the incremental path the running app takes — a file growing
     /// under a scanner that already read part of it — which a fresh process cannot
     /// exercise, since its cache starts empty. Driven by `scripts/check_hooks.sh`.
+    /// Where the app's memory actually goes, one stage at a time. The desktop metadata
+    /// was the suspected cost and turns out to be 2 MB of it; the transcripts are the
+    /// rest. Measured as phys_footprint, which is what macOS charges the app.
+    @MainActor private func memReport() {
+        func line(_ step: String) { print("\(step.padding(toLength: 22, withPad: " ", startingAt: 0)) \(Memory.mb(Memory.footprint))") }
+        line("launched")
+        let desktop = DesktopSessions()
+        desktop.refresh()
+        line("desktop metadata")
+        let scanner = LiveScanner()
+        let snap = scanner.scan()
+        line("transcripts")
+        _ = scanner.scan()
+        line("a second scan")
+        print("sessions \(snap.sessions.count)")
+    }
+
     @MainActor private func scanReplay() {
         let dir = Paths.home + "/.claude/projects/-scan-replay"
         let path = dir + "/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.jsonl"
