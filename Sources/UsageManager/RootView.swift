@@ -231,7 +231,7 @@ struct RootView: View {
             if s.needsClear(limit: model.compactLimit) {
                 // Which of the two to suggest depends on whether the last compaction had
                 // a handover behind it.
-                Text(s.handoverSaved ? "clear 권장" : "저장 먼저")
+                Text(s.handoverSaved == true ? "clear 권장" : s.handoverSaved == false ? "저장 먼저" : "저장 확인")
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.85))
                     .transition(.opacity)
@@ -250,7 +250,7 @@ struct RootView: View {
         }
         .opacity(s.isIdle ? 0.45 : 1)
         .animation(.ui, value: s.isIdle)
-        .help("\(s.tool.display) · \(s.model) · \(s.ctxTokens.formatted())/\(s.windowSize.formatted()) tokens · 압축 \(s.compactions)회\(s.lastPostTokens > 0 ? " (직전 요약 \(s.lastPostTokens.formatted()) 토큰\(s.handoverSaved ? ", 핸드오버 저장됨" : ""))" : "") · \(s.shortId)\(s.isIdle ? " · 유휴" : "")")
+        .help("\(s.tool.display) · \(s.model) · \(s.ctxTokens.formatted())/\(s.windowSize.formatted()) tokens · 압축 \(s.compactions)회\(s.lastPostTokens > 0 ? " (직전 요약 \(s.lastPostTokens.formatted()) 토큰\(s.handoverSaved == true ? ", 핸드오버 저장됨" : s.handoverSaved == false ? ", 핸드오버 없이 압축됨" : ""))" : "") · \(s.shortId)\(s.isIdle ? " · 유휴" : "")")
     }
 
     // MARK: Compaction alerts

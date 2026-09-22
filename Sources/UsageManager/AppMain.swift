@@ -53,6 +53,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let args = CommandLine.arguments
         if args.contains("--dump") { dump(); exit(0) }
         if args.contains("--arm-check") { armCheck(); exit(0) }
+        if args.contains("--scan-replay") { scanReplay(); exit(0) }
         if args.contains("--gate") {          // PreCompact(auto): hold, or let it through
             guard case .hold = Gate.decide(input: FileHandle.standardInput.readDataToEndOfFile()) else { exit(0) }
             FileHandle.standardError.write(Data(("Usage Manager: 핸드오버가 저장될 때까지 압축을 미룹니다. "
@@ -101,7 +102,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ?? max(1, UserDefaults.standard.object(forKey: "compactLimit") as? Int ?? 3)
         print("compactLimit:", limit)
         for s in snap.sessions {
-            print("session \(s.tool.display) \(s.label) \(Int(s.usedPercent))% \(s.ctxTokens)/\(s.windowSize) \(s.model) compactions=\(s.compactions) post=\(s.lastPostTokens) handover=\(s.handoverSaved) clear=\(s.needsClear(limit: limit)) idle=\(s.isIdle)")
+            print("session \(s.tool.display) \(s.label) \(Int(s.usedPercent))% \(s.ctxTokens)/\(s.windowSize) \(s.model) compactions=\(s.compactions) post=\(s.lastPostTokens) handover=\(s.handoverSaved.map(String.init) ?? "unknown") clear=\(s.needsClear(limit: limit)) idle=\(s.isIdle)")
         }
         print("hooks:", Hooks.status())
     }
@@ -112,6 +113,60 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// at which the app warns it — through `evaluateAlerts`, not a hand-made file. The
     /// warning must land below Claude Code's compaction point to be worth anything; the
     /// hold itself no longer depends on it (see `Gate`).
+    /// Drives one scanner through a sequence of appends, printing the compaction count
+    /// after each. This is the incremental path the running app takes — a file growing
+    /// under a scanner that already read part of it — which a fresh process cannot
+    /// exercise, since its cache starts empty. Driven by `scripts/check_hooks.sh`.
+    @MainActor private func scanReplay() {
+        let dir = Paths.home + "/.claude/projects/-scan-replay"
+        let path = dir + "/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.jsonl"
+        let fm = FileManager.default
+        try? fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        try? fm.removeItem(atPath: path)
+
+        let usage = #"{"type":"assistant","entrypoint":"cli","cwd":"/tmp/r","message":{"model":"claude-opus-5","usage":{"input_tokens":0,"cache_read_input_tokens":500000}}}"# + "\n"
+        let boundary = #"{"type":"system","subtype":"compact_boundary","compactMetadata":{"trigger":"auto","postTokens":30000}}"# + "\n"
+
+        func append(_ text: String) {
+            guard let fh = FileHandle(forWritingAtPath: path) else {
+                try? text.write(toFile: path, atomically: true, encoding: .utf8); return
+            }
+            defer { try? fh.close() }
+            _ = try? fh.seekToEnd()
+            try? fh.write(contentsOf: Data(text.utf8))
+        }
+
+        let scanner = LiveScanner()
+        func report(_ step: String) {
+            let snap = scanner.scan(changed: [path])
+            let n = snap.sessions.first { $0.sessionId.hasPrefix("aaaaaaaa") }?.compactions ?? -1
+            print("\(step) \(n)")
+        }
+
+        append(usage);      report("none")
+        append(boundary);   report("one")
+
+        // Half a line: nothing to count yet, and nothing lost when the rest arrives.
+        let half = boundary.index(boundary.startIndex, offsetBy: 40)
+        append(String(boundary[..<half]));  report("partial")
+        append(String(boundary[half...]));  report("completed")
+
+        // The words in a message, not a boundary of its own.
+        append(#"{"type":"user","message":{"content":"the subtype compact_boundary was mentioned"}}"# + "\n")
+        report("mention")
+
+        // A boundary landing beyond the first read of a growing file.
+        append(#"{"type":"user","message":{"content":""# + String(repeating: "x", count: 1 << 20) + #""}}"# + "\n")
+        append(boundary)
+        report("across-reads")
+
+        // Shorter than what was already counted: start over rather than trust the total.
+        try? Data(usage.utf8).write(to: URL(fileURLWithPath: path))
+        report("truncated")
+
+        try? fm.removeItem(atPath: dir)
+    }
+
     @MainActor private func armCheck() {
         let d = UserDefaults.standard
         let savedPct = d.object(forKey: "ctxThreshold"), savedOn = d.object(forKey: "alertsOn")

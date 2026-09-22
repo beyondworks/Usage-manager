@@ -91,6 +91,21 @@ printf '%s\n' "$boundary" >> "$comp"
 printf '%s\n%s\n' "$boundary" "$boundary" >> "$comp"
 [ "$(count_shown)" = 3 ] || fail "three compactions reported as $(count_shown)"
 
+# The incremental path: one scanner watching a file grow, which a fresh process cannot
+# exercise because its cache starts empty. Each step prints the count it then reports.
+cat > "$T/scan.expect" <<'EOF'
+none 0
+one 1
+partial 1
+completed 2
+mention 2
+across-reads 3
+truncated 0
+EOF
+HOME="$T" "$BIN" --scan-replay > "$T/scan.got" 2>/dev/null || fail "--scan-replay did not run"
+diff -u "$T/scan.expect" "$T/scan.got" > "$T/scan.diff" || fail "incremental scan drifted:
+$(cat "$T/scan.diff")"
+
 # Clearing is suggested once compacting again stops paying: at the user's own count, or
 # earlier if the summary itself has swollen. Both read from the transcript.
 clear_shown() { HOME="$T" USAGE_MANAGER_COMPACT_LIMIT="$1" "$BIN" --dump | sed -n 's/.*clear=\([a-z]*\).*/\1/p' | head -1; }
@@ -294,7 +309,9 @@ rm -f "$T/.usage-manager/gate-off" "$T/.usage-manager/holds/$GSID"
 # What to suggest depends on whether the gate let the last compaction through *because*
 # the handover was written. The gate records that as it passes.
 handover_shown() { HOME="$T" "$BIN" --dump | sed -n 's/.*handover=\([a-z]*\).*/\1/p' | head -1; }
-[ "$(handover_shown)" = false ] || fail "handover claimed with no record of one"
+# No record either way — a compaction from before the gate kept one. Must not read as
+# "nothing was saved".
+[ "$(handover_shown)" = unknown ] || fail "a compaction with no record was reported as $(handover_shown)"
 mkdir -p "$T/.usage-manager/pressed" "$T/.usage-manager/holds"
 transcript 900000
 [ "$(gate "$SID2")" = 2 ] || fail "handover record: expected a hold"
@@ -304,7 +321,7 @@ touch "$T/.usage-manager/pressed/$SID2"
 [ "$(handover_shown)" = true ] || fail "the app did not read the gate's handover record"
 transcript 985000
 [ "$(gate "$SID2")" = 0 ] || fail "handover record: expected a release at the limit"
-[ "$(handover_shown)" = false ] || fail "a compaction at the limit was reported as handed over"
+[ "$(handover_shown)" = false ] || fail "a compaction at the limit was reported as $(handover_shown)"
 
 # the compaction point is written as the threshold, and removed on uninstall
 python3 -c "import json,sys;d=json.load(open(sys.argv[1]));sys.exit(0 if d.get('env',{}).get('CLAUDE_AUTOCOMPACT_PCT_OVERRIDE') else 1)" "$T/.claude/settings.json" \

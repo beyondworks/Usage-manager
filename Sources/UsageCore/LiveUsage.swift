@@ -24,9 +24,10 @@ public struct SessionCtx: Sendable, Identifiable, Equatable {
     /// rollouts record no compaction event.
     public let compactions: Int
     /// What the most recent compaction left behind, and whether a handover was written
-    /// before it ran (the gate records that as it lets the compaction through).
+    /// before it ran. `nil` means no record either way — a compaction from before the
+    /// gate kept one, which must not be reported as "nothing was saved".
     public let lastPostTokens: Int
-    public let handoverSaved: Bool
+    public let handoverSaved: Bool?
 
     public var usedPercent: Double { windowSize > 0 ? Double(ctxTokens) / Double(windowSize) * 100 : 0 }
     public var hasContext: Bool { windowSize > 0 }
@@ -85,7 +86,7 @@ public struct SessionCtx: Sendable, Identifiable, Equatable {
     }
     public init(tool: ToolKind = .claudeCode, sessionId: String, project: String, title: String? = nil,
                 model: String, ctxTokens: Int, windowSize: Int, mtime: Date, compactions: Int = 0,
-                lastPostTokens: Int = 0, handoverSaved: Bool = false) {
+                lastPostTokens: Int = 0, handoverSaved: Bool? = nil) {
         self.tool = tool; self.sessionId = sessionId; self.project = project; self.title = title
         self.model = model; self.ctxTokens = ctxTokens; self.windowSize = windowSize; self.mtime = mtime
         self.compactions = compactions
@@ -231,7 +232,12 @@ public final class LiveScanner: @unchecked Sendable {
             return SessionCtx(tool: .codex, sessionId: meta.sessionId, project: Self.projectLabel(meta.cwd),
                               model: t.model, ctxTokens: t.ctxTokens, windowSize: t.window, mtime: .distantPast)
         }
-        guard let t = Self.claudeTail(path: path) else { return nil }
+        // One large tool result can fill the usual tail on its own, leaving no usage in
+        // reach — and then the session vanishes from the list until the next one arrives.
+        // Look further back before giving up on it.
+        var tail = Self.claudeTail(path: path)
+        if tail == nil || tail!.ctxTokens == 0 { tail = Self.claudeTail(path: path, bytes: 8 << 20) }
+        guard let t = tail else { return nil }
         let sid = String((path as NSString).lastPathComponent.dropLast(6))
         let c = compactionScan(path: path)
         guard isHumanAttended(entrypoint: t.entrypoint, path: path) else { return nil }
@@ -329,9 +335,10 @@ public final class LiveScanner: @unchecked Sendable {
     /// Did the gate let this session's last compaction through *because* the handover
     /// had been written? Anything else — the hard limit, a spent budget — means the
     /// session may have been compacted with nothing saved.
-    static func handoverSaved(sid: String) -> Bool {
-        (try? String(contentsOfFile: Paths.root + "/lastpass/" + sid, encoding: .utf8))?
-            .trimmingCharacters(in: .whitespacesAndNewlines) == "handover"
+    static func handoverSaved(sid: String) -> Bool? {
+        guard let s = try? String(contentsOfFile: Paths.root + "/lastpass/" + sid, encoding: .utf8)
+        else { return nil }
+        return s.trimmingCharacters(in: .whitespacesAndNewlines) == "handover"
     }
 
     /// Also read by the PreCompact gate, which needs the same two facts (size, and

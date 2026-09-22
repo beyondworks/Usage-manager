@@ -170,9 +170,13 @@ final class AppModel: ObservableObject {
                 st.clearPushed = true
                 Notifier.shared.fire(
                     title: "\(s.label) 압축 \(s.compactions)회",
-                    body: s.handoverSaved
-                        ? "핸드오버 저장됨. clear 하거나 새 세션에서 핸드오버 문서와 옵시디언을 참조해 이어 가세요."
-                        : "핸드오버가 저장되지 않았을 수 있습니다. /raw-press 로 먼저 저장한 뒤 clear 하세요.",
+                    body: {
+                        switch s.handoverSaved {
+                        case true: return "핸드오버 저장됨. clear 하거나 새 세션에서 핸드오버 문서와 옵시디언을 참조해 이어 가세요."
+                        case false: return "핸드오버 없이 압축되었습니다. /raw-press 로 먼저 저장한 뒤 clear 하세요."
+                        default: return "핸드오버 저장 여부를 알 수 없습니다. 확인한 뒤 clear 하세요."
+                        }
+                    }(),
                     id: "clear-\(s.sessionId)")
             }
             ctxState[s.sessionId] = st
