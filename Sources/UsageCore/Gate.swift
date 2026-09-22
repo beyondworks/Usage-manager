@@ -98,13 +98,23 @@ public enum Gate {
             clear(sid); return (sid, .pass("no usage found in the transcript"))
         }
 
-        // The marker only means something inside a cycle this gate opened. Left over
-        // from a cycle that ended some other way, it would wave through the next
-        // compaction on the strength of the previous one's handover.
+        // The marker has to belong to the cycle being decided now. There are two ways it
+        // can: the gate opened the cycle itself and is holding, or the app warned this
+        // session ahead of time and the agent wrote the handover before the compaction
+        // point arrived. The second is the whole point of warning early — without it a
+        // session that did as it was told would still be held once and made to write the
+        // marker again.
+        //
+        // Both markers are anchored to something a compaction erases, so neither can be
+        // spent twice: `clear` removes the hold, the warning and the marker together, and
+        // every path that releases a compaction calls it.
         let held = state(sid)
         let pressed = Paths.root + "/pressed/" + sid
-        if FileManager.default.fileExists(atPath: pressed) {
+        if let at = mtime(pressed) {
             if held != nil { clear(sid); return (sid, .pass(handoverReason)) }
+            if let warned = mtime(warning(sid)), at >= warned, now.timeIntervalSince(at) < staleMarker {
+                clear(sid); return (sid, .pass(handoverReason + " ahead of the warning"))
+            }
             try? FileManager.default.removeItem(atPath: pressed)
         }
 
@@ -208,8 +218,31 @@ public enum Gate {
     /// it belonged to and is then spent on the next one.
     static func clear(_ sid: String) {
         let fm = FileManager.default
-        for p in [file(sid), Paths.root + "/pressed/" + sid, Paths.alerts + "/\(sid).txt"] {
+        for p in [file(sid), Paths.root + "/pressed/" + sid, Paths.alerts + "/\(sid).txt", warning(sid)] {
             try? fm.removeItem(atPath: p)
         }
+    }
+
+    // MARK: - The app's early warning
+
+    /// A marker written after a warning but never spent is not evidence of anything by
+    /// the next day: the session has moved on and the handover behind it has not.
+    static let staleMarker: TimeInterval = 6 * 3600
+
+    static func warning(_ sid: String) -> String { Paths.root + "/warned/" + sid }
+
+    /// Called when the app tells a session its compaction point is near, so the gate can
+    /// tell a marker written in answer to that warning from one left over.
+    public static func recordWarning(sessionId sid: String) {
+        let dir = Paths.root + "/warned"
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        let path = dir + "/" + sid
+        if !FileManager.default.createFile(atPath: path, contents: nil) {
+            try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: path)
+        }
+    }
+
+    static func mtime(_ path: String) -> Date? {
+        (try? FileManager.default.attributesOfItem(atPath: path))?[.modificationDate] as? Date
     }
 }

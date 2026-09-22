@@ -318,6 +318,30 @@ transcript 900000
 [ ! -f "$T/.usage-manager/pressed/$GSID" ] || fail "stale marker not discarded"
 rm -f "$T/.usage-manager/holds/$GSID" "$T/.usage-manager/alerts/$GSID.txt"
 
+# A session that answered the app's early warning has already written its handover, so
+# holding it would only make it write the marker a second time. The warning is what
+# tells the two apart: the marker has to come after it.
+mkdir -p "$T/.usage-manager/warned"
+touch "$T/.usage-manager/warned/$GSID" "$T/.usage-manager/pressed/$GSID"
+transcript 900000
+[ "$(gate "$GSID")" = 0 ] || fail "a session that prepared after the warning was held anyway"
+[ ! -f "$T/.usage-manager/warned/$GSID" ] || fail "the warning outlived the compaction"
+[ -z "$(ls "$T/.usage-manager/holds/" 2>/dev/null)" ] || fail "held after passing on the warning"
+
+# A marker from before the warning belongs to whatever came before it.
+touch -t "$(date -v-2H +%Y%m%d%H%M)" "$T/.usage-manager/pressed/$GSID"
+touch "$T/.usage-manager/warned/$GSID"
+transcript 900000
+[ "$(gate "$GSID")" = 2 ] || fail "a marker older than the warning was accepted"
+rm -f "$T/.usage-manager/holds/$GSID" "$T/.usage-manager/alerts/$GSID.txt" "$T/.usage-manager/warned/$GSID"
+
+# ...and one left lying for a day says nothing about a session that has moved on since.
+touch "$T/.usage-manager/warned/$GSID"
+touch -t "$(date -v-8H +%Y%m%d%H%M)" "$T/.usage-manager/warned/$GSID" "$T/.usage-manager/pressed/$GSID"
+transcript 900000
+[ "$(gate "$GSID")" = 2 ] || fail "a marker eight hours old was accepted"
+rm -f "$T/.usage-manager/holds/$GSID" "$T/.usage-manager/alerts/$GSID.txt" "$T/.usage-manager/warned/$GSID"
+
 # A subagent's hooks carry its parent's session id. Holding there, or spending the
 # parent's notice and marker, would let the parent compact with no handover of its own.
 rm -f "$T/.usage-manager/holds/$GSID" "$T/.usage-manager/alerts/$GSID.txt"
