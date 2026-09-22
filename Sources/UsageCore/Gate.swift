@@ -86,9 +86,15 @@ public enum Gate {
         // Nobody is watching a headless run, so a notice there is not actionable.
         // One big tool result can fill the usual tail on its own, so when no usage is
         // in reach, look further back before giving up on measuring the session.
+        // The marker's time is read first: the tail pass needs it to also report how
+        // large the session was when the handover behind it was written.
+        let pressed = Paths.root + "/pressed/" + sid
+        let pressedAt = mtime(pressed)
         let path = (obj["transcript_path"] as? String) ?? ""
-        var tail = LiveScanner.claudeTail(path: path)
-        if tail == nil || tail!.ctxTokens == 0 { tail = LiveScanner.claudeTail(path: path, bytes: 8 << 20) }
+        var tail = LiveScanner.claudeTail(path: path, since: pressedAt)
+        if tail == nil || tail!.ctxTokens == 0 || (pressedAt != nil && tail!.tokensAt == nil) {
+            tail = LiveScanner.claudeTail(path: path, bytes: 8 << 20, since: pressedAt)
+        }
         if let ep = tail?.entrypoint, ep.hasPrefix("sdk") { clear(sid); return (sid, .pass("headless session")) }
 
         // No usage in reach means no idea how large this session is, and holding blind
@@ -112,24 +118,22 @@ public enum Gate {
         let ctx = tail.nextRequestTokens
 
         let held = state(sid)
-        let pressed = Paths.root + "/pressed/" + sid
-        if let at = mtime(pressed) {
+        // A marker written during a hold is answered within the same minute, so the
+        // handover behind it is the session as it stands. One written at the app's early
+        // warning is not: the warning goes out before the compaction point and the
+        // session keeps working in between — measured at 22,000 tokens in one case, all
+        // of it absent from the handover it was then compacted on.
+        var stale = false
+        if let at = pressedAt {
             if held != nil { clear(sid); return (sid, .pass(handoverReason)) }
             if let warned = mtime(warning(sid)), at >= warned, now.timeIntervalSince(at) < staleMarker {
-                // The app's warning is a guess at where this session compacts, drawn from
-                // the threshold the user set; a session started before that setting took
-                // effect compacts much later and can run a long way past its warning. The
-                // handover behind the marker describes the session as it was then.
-                // A warning with no size behind it was written by a version that did not
-                // record one, so there is no way to tell a fresh handover from one
-                // thirteen thousand tokens old. Held rather than guessed: the cost is one
-                // more save, and the cost of guessing wrong is the work in between.
-                let grew = warnedAt(sid).map { ctx - $0 }
-                if let grew, grew < staleTokens {
+                let grew = tail.tokensAt.map { ctx - $0 }
+                if let grew, grew < deltaTokens {
                     clear(sid); return (sid, .pass(handoverReason + " ahead of the warning"))
                 }
-                log("\(sid) marker \(grew.map { "set \($0) tokens ago" } ?? "from an older version")"
-                    + " — holding for a fresher handover")
+                stale = true
+                log("\(sid) grew \(grew.map(String.init) ?? "an unknown amount") tokens after the marker"
+                    + " — holding for the rest")
             }
             try? FileManager.default.removeItem(atPath: pressed)
         }
@@ -150,7 +154,7 @@ public enum Gate {
         // Once per cycle: `ctx-hook.sh` hands it over on the session's next tool call,
         // and restarts the budget from that moment — the agent cannot act on a notice
         // it has not been given yet.
-        if s.n == 1 { Hooks.queueNotice(sessionId: sid, text: notice(sid: sid)) }
+        if s.n == 1 { Hooks.queueNotice(sessionId: sid, text: stale ? delta(sid: sid) : notice(sid: sid)) }
         return (sid, .hold("hold \(s.n) (\(ctx) tokens)"))
     }
 
@@ -170,6 +174,20 @@ public enum Gate {
         if tail?.model.contains("[1m]") == true { return 1_000_000 }
         if (tail?.ctxTokens ?? 0) > 200_000 { return 1_000_000 }
         return 200_000
+    }
+
+    /// For a session that already saved once at the warning and kept working. Only the
+    /// difference is asked for, so this finishes well inside the hold.
+    public static func delta(sid: String) -> String {
+        """
+        [Usage Manager] 이 세션의 자동 압축이 보류되었습니다. 핸드오버를 저장한 뒤로도 작업이 이어져서, \
+        그 사이 내용이 저장본에 빠져 있습니다. 사용자에게 묻지 말고 지금 바로 진행하세요.
+        ① 마지막 저장 이후에 한 일만 SESSION_HANDOVER.md 에 덧붙입니다(처음부터 다시 쓰지 않습니다).
+        ② obsidian-save 로 그 갱신본을 저장합니다.
+        ③ `touch ~/.usage-manager/pressed/\(sid)` 를 실행하면 압축이 이어집니다. 이번에는 한 번만 \
+        묻습니다 — 마커를 누르면 그대로 압축됩니다.
+        보류는 약 10분 뒤 자동으로 풀립니다.
+        """
     }
 
     public static func notice(sid: String) -> String {
@@ -247,23 +265,21 @@ public enum Gate {
 
     /// Called when the app tells a session its compaction point is near, so the gate can
     /// tell a marker written in answer to that warning from one left over.
-    public static func recordWarning(sessionId sid: String, tokens: Int) {
+    public static func recordWarning(sessionId sid: String) {
         let dir = Paths.root + "/warned"
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-        try? "\(tokens)".write(toFile: dir + "/" + sid, atomically: true, encoding: .utf8)
+        let path = dir + "/" + sid
+        if !FileManager.default.createFile(atPath: path, contents: nil) {
+            try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: path)
+        }
     }
 
-    /// How large the session was when it was warned, or nil if it never was.
-    static func warnedAt(_ sid: String) -> Int? {
-        (try? String(contentsOfFile: warning(sid), encoding: .utf8)).flatMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
-    }
-
-    /// How far a session may run past its warning and still be let through on the
-    /// handover it wrote then. The warning goes out `min(30000, effective/20)` before
-    /// the compaction point, so a session that acted on it arrives well inside this;
-    /// one that is only now reaching the point after a much earlier warning has done
-    /// work its handover does not describe, and is held so it can add it.
-    static let staleTokens = 50_000
+    /// How much a session may grow between writing its handover and being compacted and
+    /// still count as described by it. Writing the handover costs a few thousand tokens
+    /// of its own, so this cannot be zero; past it there is real work the handover does
+    /// not mention, and the gate asks for that difference rather than compacting without
+    /// it.
+    static let deltaTokens = 5_000
 
     static func mtime(_ path: String) -> Date? {
         (try? FileManager.default.attributesOfItem(atPath: path))?[.modificationDate] as? Date

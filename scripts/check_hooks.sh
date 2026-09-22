@@ -110,6 +110,24 @@ printf '%s\n' "$boundary" >> "$comp"
 printf '%s\n%s\n' "$boundary" "$boundary" >> "$comp"
 [ "$(count_shown)" = 3 ] || fail "three compactions reported as $(count_shown)"
 
+# Where a session compacts is read from where it last compacted, not calculated from the
+# current setting: a session started before that setting took effect compacts somewhere
+# else entirely. Only an automatic compaction says anything — a hand-run /compact happens
+# wherever the user asked — and only a believable number, inside the range the slider can
+# produce.
+cp "$comp" "$comp.bak"   # these boundaries are this check's own; later checks count them
+measured() { HOME="$T" "$BIN" --dump | grep -o 'compact_at=[0-9]* measured' | head -1; }
+calculated() { HOME="$T" "$BIN" --dump | grep -c 'compact_at=[0-9]* from the setting'; }
+pre() { printf '{"type":"system","subtype":"compact_boundary","compactMetadata":{"trigger":"%s","preTokens":%s}}\n' "$1" "$2" >> "$comp"; }
+[ "$(calculated)" = 1 ] || fail "a session with no automatic compaction did not fall back to the setting"
+pre auto 832917
+[ "$(measured)" = "compact_at=832917 measured" ] || fail "the session's own compaction point reported as '$(measured)'"
+pre manual 500000
+[ "$(measured)" = "compact_at=832917 measured" ] || fail "a hand-run /compact moved the compaction point to '$(measured)'"
+pre auto 100000
+[ "$(calculated)" = 1 ] || fail "an implausible preTokens was believed instead of the setting"
+mv "$comp.bak" "$comp"
+
 # The incremental path: one scanner watching a file grow, which a fresh process cannot
 # exercise because its cache starts empty. Each step prints the count it then reports.
 cat > "$T/scan.expect" <<'EOF'
@@ -321,51 +339,55 @@ rm -f "$T/.usage-manager/holds/$GSID" "$T/.usage-manager/alerts/$GSID.txt"
 # A session that answered the app's early warning has already written its handover, so
 # holding it would only make it write the marker a second time. The warning is what
 # tells the two apart: the marker has to come after it.
+#
+# What counts is how far the session ran past the *marker*, not past the warning: the
+# warning goes out before the compaction point, so a session that saves when warned keeps
+# working afterwards — measured at 22,000 tokens in one real case, none of it in the
+# handover it was then compacted on.
+grown() {  # grown <tokens-before-marker> <tokens-now>
+  { printf '{"type":"assistant","entrypoint":"cli","cwd":"/tmp/demo","timestamp":"%s","message":{"model":"claude-opus-5","usage":{"input_tokens":10,"cache_read_input_tokens":%s}}}\n' \
+      "$(date -u -v-20M +%Y-%m-%dT%H:%M:%S.000Z)" "$1"
+    printf '{"type":"assistant","entrypoint":"cli","cwd":"/tmp/demo","timestamp":"%s","message":{"model":"claude-opus-5","usage":{"input_tokens":10,"cache_read_input_tokens":%s}}}\n' \
+      "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "$2"
+  } > "$TR"
+}
 mkdir -p "$T/.usage-manager/warned"
-echo 890000 > "$T/.usage-manager/warned/$GSID"
-touch "$T/.usage-manager/pressed/$GSID"
-transcript 900000
+touch -t "$(date -v-30M +%Y%m%d%H%M)" "$T/.usage-manager/warned/$GSID"
+touch -t "$(date -v-15M +%Y%m%d%H%M)" "$T/.usage-manager/pressed/$GSID"
+grown 832000 832900
 [ "$(gate "$GSID")" = 0 ] || fail "a session that prepared after the warning was held anyway"
 [ ! -f "$T/.usage-manager/warned/$GSID" ] || fail "the warning outlived the compaction"
 [ -z "$(ls "$T/.usage-manager/holds/" 2>/dev/null)" ] || fail "held after passing on the warning"
 
+# 22k of work after the marker is 22k the handover does not describe.
+touch -t "$(date -v-30M +%Y%m%d%H%M)" "$T/.usage-manager/warned/$GSID"
+touch -t "$(date -v-15M +%Y%m%d%H%M)" "$T/.usage-manager/pressed/$GSID"
+grown 809000 832900
+[ "$(gate "$GSID")" = 2 ] || fail "22k of work done after the handover was compacted away"
+grep -q '마지막 저장 이후' "$T/.usage-manager/alerts/$GSID.txt" || fail "the notice does not ask for the difference only"
+rm -f "$T/.usage-manager/holds/$GSID" "$T/.usage-manager/alerts/$GSID.txt"
+
 # A marker from before the warning belongs to whatever came before it.
-touch -t "$(date -v-2H +%Y%m%d%H%M)" "$T/.usage-manager/pressed/$GSID"
-echo 890000 > "$T/.usage-manager/warned/$GSID"
-transcript 900000
+touch -t "$(date -v-40M +%Y%m%d%H%M)" "$T/.usage-manager/pressed/$GSID"
+touch -t "$(date -v-30M +%Y%m%d%H%M)" "$T/.usage-manager/warned/$GSID"
+grown 832000 832900
 [ "$(gate "$GSID")" = 2 ] || fail "a marker older than the warning was accepted"
 rm -f "$T/.usage-manager/holds/$GSID" "$T/.usage-manager/alerts/$GSID.txt" "$T/.usage-manager/warned/$GSID"
 
 # ...and one left lying for a day says nothing about a session that has moved on since.
-echo 890000 > "$T/.usage-manager/warned/$GSID"
 touch -t "$(date -v-8H +%Y%m%d%H%M)" "$T/.usage-manager/warned/$GSID" "$T/.usage-manager/pressed/$GSID"
-transcript 900000
+grown 832000 832900
 [ "$(gate "$GSID")" = 2 ] || fail "a marker eight hours old was accepted"
 rm -f "$T/.usage-manager/holds/$GSID" "$T/.usage-manager/alerts/$GSID.txt" "$T/.usage-manager/warned/$GSID"
 
-# The warning is only a guess at where this session compacts — a session started before
-# the setting took effect compacts much later and can run a long way past it. The
-# handover behind the marker is then old, whatever its timestamp says.
-echo 830000 > "$T/.usage-manager/warned/$GSID"
+# Being held once is the whole of it: the marker written in answer ends the cycle.
+touch "$T/.usage-manager/warned/$GSID"
+grown 809000 832900
+[ "$(gate "$GSID")" = 2 ] || fail "setup: expected a hold"
 touch "$T/.usage-manager/pressed/$GSID"
-transcript 900000
-[ "$(gate "$GSID")" = 2 ] || fail "a handover written 70k tokens ago was accepted"
-rm -f "$T/.usage-manager/holds/$GSID" "$T/.usage-manager/alerts/$GSID.txt"
-
-# ...while a session that acted on its warning arrives well inside that distance.
-echo 880000 > "$T/.usage-manager/warned/$GSID"
-touch "$T/.usage-manager/pressed/$GSID"
-transcript 900000
-[ "$(gate "$GSID")" = 0 ] || fail "a session that acted on its warning was held"
+[ "$(gate "$GSID")" = 0 ] || fail "held a second time after the marker was written"
 rm -f "$T/.usage-manager/holds/$GSID" "$T/.usage-manager/alerts/$GSID.txt" "$T/.usage-manager/warned/$GSID"
-
-# A warning left by a version that recorded no size says nothing about how old the
-# handover is. Held, not guessed — the cost is one more save.
-: > "$T/.usage-manager/warned/$GSID"
-touch "$T/.usage-manager/pressed/$GSID"
 transcript 900000
-[ "$(gate "$GSID")" = 2 ] || fail "a warning with no size behind it was accepted"
-rm -f "$T/.usage-manager/holds/$GSID" "$T/.usage-manager/alerts/$GSID.txt" "$T/.usage-manager/warned/$GSID"
 
 # A subagent's hooks carry its parent's session id. Holding there, or spending the
 # parent's notice and marker, would let the parent compact with no handover of its own.

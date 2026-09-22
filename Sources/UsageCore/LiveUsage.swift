@@ -19,7 +19,7 @@ public struct SessionCtx: Sendable, Identifiable, Equatable {
     public let model: String
     public let ctxTokens: Int
     public let windowSize: Int
-    public let mtime: Date
+    public internal(set) var mtime: Date
     /// How many times this transcript has been compacted. Claude Code only — Codex
     /// rollouts record no compaction event.
     public let compactions: Int
@@ -48,6 +48,9 @@ public struct SessionCtx: Sendable, Identifiable, Equatable {
     /// gate kept one, which must not be reported as "nothing was saved".
     public let lastPostTokens: Int
     public let handoverSaved: Bool?
+    /// How large this session was at its last automatic compaction — its own compaction
+    /// point, measured. 0 when it has never compacted by itself.
+    public let compactedAt: Int
 
     public var usedPercent: Double { windowSize > 0 ? Double(ctxTokens) / Double(windowSize) * 100 : 0 }
     public var hasContext: Bool { windowSize > 0 }
@@ -95,8 +98,23 @@ public struct SessionCtx: Sendable, Identifiable, Equatable {
     /// already started, so the threshold the user picks is what Claude Code is told,
     /// and these are what the app itself watches.
     var effectiveWindow: Int { max(0, windowSize - 20_000) }
+
+    /// Where this session actually compacted last time, when that is believable. The
+    /// formula below needs the threshold Claude Code is running with, and a session
+    /// started before the setting changed is not running with the current one — this is
+    /// that session read from its own transcript instead of guessed at.
+    ///
+    /// Believable means inside the range the setting can produce: the slider stops at
+    /// 50%, and the formula's other arm is `effective - 13000`. A number outside that
+    /// came from something else, so the formula is used instead.
+    public var measuredCompactionPoint: Int? {
+        guard compactedAt > 0, windowSize > 0 else { return nil }
+        return (effectiveWindow * 2 / 5 ... windowSize).contains(compactedAt) ? compactedAt : nil
+    }
+
     public func compactionTokens(pct: Int) -> Int {
-        min(effectiveWindow * max(1, min(100, pct)) / 100, effectiveWindow - 13_000)
+        measuredCompactionPoint
+            ?? min(effectiveWindow * max(1, min(100, pct)) / 100, effectiveWindow - 13_000)
     }
     /// Arm one step earlier, so the notice and the gate's arming both land first.
     public func armTokens(pct: Int) -> Int {
@@ -104,12 +122,13 @@ public struct SessionCtx: Sendable, Identifiable, Equatable {
     }
     public init(tool: ToolKind = .claudeCode, sessionId: String, project: String, title: String? = nil,
                 model: String, ctxTokens: Int, windowSize: Int, mtime: Date, compactions: Int = 0,
-                lastPostTokens: Int = 0, handoverSaved: Bool? = nil,
+                lastPostTokens: Int = 0, handoverSaved: Bool? = nil, compactedAt: Int = 0,
                 cacheTTL: TimeInterval = 0, lastReplyAt: Date? = nil, titleSource: String = "folder") {
         self.tool = tool; self.sessionId = sessionId; self.project = project; self.title = title
         self.model = model; self.ctxTokens = ctxTokens; self.windowSize = windowSize; self.mtime = mtime
         self.compactions = compactions
         self.lastPostTokens = lastPostTokens; self.handoverSaved = handoverSaved
+        self.compactedAt = compactedAt
         self.cacheTTL = cacheTTL; self.lastReplyAt = lastReplyAt
         self.titleSource = titleSource
     }
@@ -138,7 +157,7 @@ public final class LiveScanner: @unchecked Sendable {
     private var recent: [String: Date] = [:]               // session log → mtime, within window
     private var parsed: [String: (size: UInt64, s: SessionCtx?)] = [:]
     private var human: [String: (offset: UInt64, yes: Bool)] = [:]
-    private var compacted: [String: (offset: UInt64, count: Int, post: Int)] = [:]
+    private var compacted: [String: (offset: UInt64, count: Int, post: Int, autoPre: Int)] = [:]
     private let desktop = DesktopSessions()
     private var claudeWeekly: Limit?
     private var codexWeekly: Limit?
@@ -281,7 +300,7 @@ public final class LiveScanner: @unchecked Sendable {
                           model: t.model, ctxTokens: t.ctxTokens,
                           windowSize: claudeWindow(sid: sid, model: t.model, ctx: t.ctxTokens), mtime: .distantPast,
                           compactions: c.count, lastPostTokens: c.postTokens,
-                          handoverSaved: Self.handoverSaved(sid: sid),
+                          handoverSaved: Self.handoverSaved(sid: sid), compactedAt: c.autoPre,
                           cacheTTL: t.cacheTTL, lastReplyAt: t.repliedAt, titleSource: source)
     }
 
@@ -326,12 +345,12 @@ public final class LiveScanner: @unchecked Sendable {
     /// largest here, 47 MB), then only what has been appended since.
     private static let compactMarker = Data(#""subtype":"compact_boundary""#.utf8)
 
-    private func compactionScan(path: String) -> (count: Int, postTokens: Int) {
-        var st = compacted[path] ?? (0, 0, 0)
-        guard let fh = FileHandle(forReadingAtPath: path) else { return (st.count, st.post) }
+    private func compactionScan(path: String) -> (count: Int, postTokens: Int, autoPre: Int) {
+        var st = compacted[path] ?? (0, 0, 0, 0)
+        guard let fh = FileHandle(forReadingAtPath: path) else { return (st.count, st.post, st.autoPre) }
         defer { try? fh.close() }
         let size = (try? fh.seekToEnd()) ?? 0
-        if size < st.offset { st = (0, 0, 0) }   // replaced or truncated: count again
+        if size < st.offset { st = (0, 0, 0, 0) }   // replaced or truncated: count again
         if st.offset < size {
             try? fh.seek(toOffset: st.offset)
             var buf = Data()
@@ -348,18 +367,24 @@ public final class LiveScanner: @unchecked Sendable {
                 let found = Self.markers(in: buf[buf.startIndex...nl])
                 st.count += found.count
                 if found.count > 0 { st.post = found.post }
+                if found.autoPre > 0 { st.autoPre = found.autoPre }
                 st.offset += UInt64(buf.distance(from: buf.startIndex, to: nl) + 1)
                 buf = Data(buf[(nl + 1)...])
                 return true
             }) {}
         }
         compacted[path] = st
-        return (st.count, st.post)
+        return (st.count, st.post, st.autoPre)
     }
 
-    /// Compaction boundaries in one chunk, and what the last of them left behind.
-    private static func markers(in hay: Data) -> (count: Int, post: Int) {
-        var n = 0, post = 0, from = hay.startIndex
+    /// Compaction boundaries in one chunk: how many, what the last left behind, and how
+    /// large the session was when it last compacted by itself. That last number is the
+    /// session's own compaction point, measured rather than calculated — a session
+    /// started before the threshold setting took effect compacts somewhere else entirely.
+    /// Only `auto` counts: a hand-run /compact says nothing about where the automatic one
+    /// would have fired.
+    private static func markers(in hay: Data) -> (count: Int, post: Int, autoPre: Int) {
+        var n = 0, post = 0, pre = 0, from = hay.startIndex
         while let r = hay.range(of: compactMarker, in: from..<hay.endIndex) {
             n += 1
             from = r.upperBound
@@ -369,9 +394,10 @@ public final class LiveScanner: @unchecked Sendable {
             if let obj = try? JSONSerialization.jsonObject(with: Data(hay[lineStart..<lineEnd])) as? [String: Any],
                let meta = obj["compactMetadata"] as? [String: Any] {
                 post = int(meta["postTokens"])
+                if meta["trigger"] as? String == "auto" { pre = int(meta["preTokens"]) }
             }
         }
-        return (n, post)
+        return (n, post, pre)
     }
 
     /// Did the gate let this session's last compaction through *because* the handover
@@ -407,17 +433,24 @@ public final class LiveScanner: @unchecked Sendable {
         /// counted three times over (see `contentChars`), which brings Korean and other
         /// multi-byte results to roughly one token per character rather than a third.
         public var nextRequestTokens: Int { ctxTokens + trailingChars / 3 }
+
+        /// How large the session was at the moment `since` names — the marker's, when the
+        /// gate is deciding whether the handover behind it still describes this session.
+        /// nil when the tail did not reach back that far.
+        public let tokensAt: Int?
     }
 
     /// Backward pass over the last 256 KB: latest assistant `usage`, cwd, entrypoint,
     /// and the newest user-set session name.
-    public static func claudeTail(path: String, bytes: UInt64 = 256 * 1024) -> ClaudeTail? {
+    public static func claudeTail(path: String, bytes: UInt64 = 256 * 1024, since: Date? = nil) -> ClaudeTail? {
         guard let data = FileTail.read(path: path, bytes: bytes) else { return nil }
         var cwd = "", title: String?, entrypoint: String?
         var hit: (ctx: Int, model: String)?
         var ttl: TimeInterval = 0
         var repliedAt: Date?
         var trailing = 0, queued = 0
+        // Only walked when a caller asks: the pass normally stops at the current usage.
+        var earlier: Int?, past = false
         for line in data.split(separator: 0x0A, omittingEmptySubsequences: true).reversed() {
             guard let obj = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any] else { continue }
             queued += contentChars(obj)
@@ -432,7 +465,18 @@ public final class LiveScanner: @unchecked Sendable {
                     // same usage, so keep walking back through them: everything between
                     // them is queued for the next request. An older, different usage ends
                     // the round.
-                    if let h = hit, ctx != h.ctx { break }
+                    if let h = hit, ctx != h.ctx {
+                        guard since != nil else { break }
+                        past = true
+                    }
+                    if past {
+                        // Keep walking back for the size the session was when `since`
+                        // happened, then stop.
+                        if let s = since, let ts = TimeUtil.iso(obj["timestamp"]), ts <= s {
+                            earlier = ctx; break
+                        }
+                        continue
+                    }
                     hit = (ctx, (msg["model"] as? String) ?? "claude")
                     trailing = queued
                     if let cc = u["cache_creation"] as? [String: Any] {
@@ -446,7 +490,7 @@ public final class LiveScanner: @unchecked Sendable {
         guard let hit else { return nil }
         return ClaudeTail(ctxTokens: hit.ctx, model: hit.model, cwd: cwd, title: title,
                           entrypoint: entrypoint, cacheTTL: ttl, repliedAt: repliedAt,
-                          trailingChars: trailing)
+                          trailingChars: trailing, tokensAt: earlier)
     }
 
     /// Text carried by one transcript line — tool results and message text. A line that
@@ -491,10 +535,9 @@ public final class LiveScanner: @unchecked Sendable {
 }
 
 private extension SessionCtx {
+    /// Copied rather than rebuilt field by field: the rebuilt version silently dropped
+    /// whatever field was added last, and the session lost it on the way to the list.
     func with(mtime: Date) -> SessionCtx {
-        SessionCtx(tool: tool, sessionId: sessionId, project: project, title: title, model: model,
-                   ctxTokens: ctxTokens, windowSize: windowSize, mtime: mtime, compactions: compactions,
-                   lastPostTokens: lastPostTokens, handoverSaved: handoverSaved,
-                   cacheTTL: cacheTTL, lastReplyAt: lastReplyAt, titleSource: titleSource)
+        var c = self; c.mtime = mtime; return c
     }
 }

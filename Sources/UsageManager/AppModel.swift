@@ -188,7 +188,7 @@ final class AppModel: ObservableObject {
                 Hooks.queueNotice(sessionId: s.sessionId, text: notice(for: s))
                 // So the gate accepts the marker this warning asks for, instead of
                 // holding the session once and asking for it a second time.
-                Gate.recordWarning(sessionId: s.sessionId, tokens: s.ctxTokens)
+                Gate.recordWarning(sessionId: s.sessionId)
                 if now.timeIntervalSince(st.lastNotified) > 600 { pending.append(s); st.lastNotified = now }
             } else if s.ctxTokens < arm - arm / 10 {
                 st.armed = true
