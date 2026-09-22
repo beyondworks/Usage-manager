@@ -120,11 +120,16 @@ public enum Gate {
                 // the threshold the user set; a session started before that setting took
                 // effect compacts much later and can run a long way past its warning. The
                 // handover behind the marker describes the session as it was then.
-                let grew = ctx - (warnedAt(sid) ?? ctx)
-                if grew < staleTokens {
+                // A warning with no size behind it was written by a version that did not
+                // record one, so there is no way to tell a fresh handover from one
+                // thirteen thousand tokens old. Held rather than guessed: the cost is one
+                // more save, and the cost of guessing wrong is the work in between.
+                let grew = warnedAt(sid).map { ctx - $0 }
+                if let grew, grew < staleTokens {
                     clear(sid); return (sid, .pass(handoverReason + " ahead of the warning"))
                 }
-                log("\(sid) marker set \(grew) tokens ago — holding for a fresher handover")
+                log("\(sid) marker \(grew.map { "set \($0) tokens ago" } ?? "from an older version")"
+                    + " — holding for a fresher handover")
             }
             try? FileManager.default.removeItem(atPath: pressed)
         }

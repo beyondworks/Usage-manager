@@ -322,7 +322,8 @@ rm -f "$T/.usage-manager/holds/$GSID" "$T/.usage-manager/alerts/$GSID.txt"
 # holding it would only make it write the marker a second time. The warning is what
 # tells the two apart: the marker has to come after it.
 mkdir -p "$T/.usage-manager/warned"
-touch "$T/.usage-manager/warned/$GSID" "$T/.usage-manager/pressed/$GSID"
+echo 890000 > "$T/.usage-manager/warned/$GSID"
+touch "$T/.usage-manager/pressed/$GSID"
 transcript 900000
 [ "$(gate "$GSID")" = 0 ] || fail "a session that prepared after the warning was held anyway"
 [ ! -f "$T/.usage-manager/warned/$GSID" ] || fail "the warning outlived the compaction"
@@ -330,13 +331,13 @@ transcript 900000
 
 # A marker from before the warning belongs to whatever came before it.
 touch -t "$(date -v-2H +%Y%m%d%H%M)" "$T/.usage-manager/pressed/$GSID"
-touch "$T/.usage-manager/warned/$GSID"
+echo 890000 > "$T/.usage-manager/warned/$GSID"
 transcript 900000
 [ "$(gate "$GSID")" = 2 ] || fail "a marker older than the warning was accepted"
 rm -f "$T/.usage-manager/holds/$GSID" "$T/.usage-manager/alerts/$GSID.txt" "$T/.usage-manager/warned/$GSID"
 
 # ...and one left lying for a day says nothing about a session that has moved on since.
-touch "$T/.usage-manager/warned/$GSID"
+echo 890000 > "$T/.usage-manager/warned/$GSID"
 touch -t "$(date -v-8H +%Y%m%d%H%M)" "$T/.usage-manager/warned/$GSID" "$T/.usage-manager/pressed/$GSID"
 transcript 900000
 [ "$(gate "$GSID")" = 2 ] || fail "a marker eight hours old was accepted"
@@ -356,6 +357,14 @@ echo 880000 > "$T/.usage-manager/warned/$GSID"
 touch "$T/.usage-manager/pressed/$GSID"
 transcript 900000
 [ "$(gate "$GSID")" = 0 ] || fail "a session that acted on its warning was held"
+rm -f "$T/.usage-manager/holds/$GSID" "$T/.usage-manager/alerts/$GSID.txt" "$T/.usage-manager/warned/$GSID"
+
+# A warning left by a version that recorded no size says nothing about how old the
+# handover is. Held, not guessed — the cost is one more save.
+: > "$T/.usage-manager/warned/$GSID"
+touch "$T/.usage-manager/pressed/$GSID"
+transcript 900000
+[ "$(gate "$GSID")" = 2 ] || fail "a warning with no size behind it was accepted"
 rm -f "$T/.usage-manager/holds/$GSID" "$T/.usage-manager/alerts/$GSID.txt" "$T/.usage-manager/warned/$GSID"
 
 # A subagent's hooks carry its parent's session id. Holding there, or spending the
