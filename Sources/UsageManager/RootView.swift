@@ -73,11 +73,30 @@ private struct GaugeRow<Leading: View, Trailing: View>: View {
     @ViewBuilder let leading: Leading
     @ViewBuilder let trailing: Trailing
 
+    /// The bar runs the whole row, so at high occupancy it passes under the badges and
+    /// the number on the right and its edge cuts across them. Darkening just behind
+    /// those keeps them legible without stopping the bar short, which would make a full
+    /// row look unfinished.
+    private var shade: some View {
+        LinearGradient(colors: [RootView.panel.opacity(0), RootView.panel.opacity(0.78)],
+                       startPoint: .leading, endPoint: .trailing)
+    }
+
     var body: some View {
         HStack(spacing: 10) {
             leading
             Spacer(minLength: 6)
-            trailing
+            // One shade behind the whole group, not one behind each: the trailing views
+            // are a ViewBuilder, so a background applied to them lands on every one.
+            HStack(spacing: 10) { trailing }
+                .padding(.leading, 14)
+                // Reach the row's own edge and full height, so the shade ends where the
+                // capsule does instead of leaving a lit rim around it. The negative
+                // padding puts the layout back where it was.
+                .padding(.trailing, height * 0.36)
+                .frame(maxHeight: .infinity)
+                .background(shade)
+                .padding(.trailing, -height * 0.36)
         }
         .padding(.horizontal, height * 0.36)
         .frame(height: height)
@@ -99,6 +118,7 @@ struct RootView: View {
     /// Row surface on the dark panel.
     static let plate = Color.white.opacity(0.08)
     static let panelNS = NSColor(white: 0.045, alpha: 1)
+    static let panel = Color(nsColor: panelNS)
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Namespace private var chip
     @State private var contentHeight: CGFloat = 0
