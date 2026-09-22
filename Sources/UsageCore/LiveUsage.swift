@@ -451,9 +451,21 @@ public final class LiveScanner: @unchecked Sendable {
         var trailing = 0, queued = 0
         // Only walked when a caller asks: the pass normally stops at the current usage.
         var earlier: Int?, past = false
+        // Between a compaction and the first reply after it there is no usage to read,
+        // and the pass used to walk straight past the boundary and report the session's
+        // size from *before* it — a session at 9,500 tokens read as 135,937, which is
+        // over any threshold, so the app warned it to write a handover it had just
+        // written. What the compaction left behind is the size until the next reply.
+        var afterCompaction: Int?, queuedAfter = 0
         for line in data.split(separator: 0x0A, omittingEmptySubsequences: true).reversed() {
             guard let obj = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any] else { continue }
             queued += contentChars(obj)
+            if hit == nil, afterCompaction == nil, obj["subtype"] as? String == "compact_boundary" {
+                // Keep walking for the model, which the boundary line does not carry.
+                afterCompaction = int((obj["compactMetadata"] as? [String: Any])?["postTokens"])
+                queuedAfter = queued
+                guard afterCompaction! > 0 else { break }
+            }
             if cwd.isEmpty, let c = obj["cwd"] as? String { cwd = c }
             if entrypoint == nil, let ep = obj["entrypoint"] as? String { entrypoint = ep }
             if title == nil, obj["type"] as? String == "custom-title",
@@ -465,6 +477,13 @@ public final class LiveScanner: @unchecked Sendable {
                     // same usage, so keep walking back through them: everything between
                     // them is queued for the next request. An older, different usage ends
                     // the round.
+                    if let post = afterCompaction {
+                        // The first usage above the boundary is the session before it.
+                        // Take only its model; the size is what the compaction left.
+                        hit = (post, (msg["model"] as? String) ?? "claude")
+                        trailing = queuedAfter
+                        break
+                    }
                     if let h = hit, ctx != h.ctx {
                         guard since != nil else { break }
                         past = true

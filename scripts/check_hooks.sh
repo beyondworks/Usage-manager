@@ -102,12 +102,17 @@ grep -q '\[notify\]' "$T/app.log" || fail "no push fired"
 # process, so this checks the count itself; the incremental cache inside a running app
 # only engages when a file grows, and is not exercised here.
 comp="$T/.claude/projects/-tmp-demo/$SID2.jsonl"
-boundary='{"type":"system","subtype":"compact_boundary","compactMetadata":{"trigger":"auto"}}'
+boundary='{"type":"system","subtype":"compact_boundary","compactMetadata":{"trigger":"auto","postTokens":30000}}'
+# A boundary is followed by the conversation that resumed after it, as in a real
+# transcript — a file ending at the boundary is the separate case checked further down.
+resumed() { printf '%s\n' "$boundary" >> "$comp"
+            printf '{"type":"assistant","entrypoint":"cli","cwd":"/tmp/demo","timestamp":"%s","message":{"model":"claude-opus-5","usage":{"input_tokens":10,"cache_read_input_tokens":950000}}}\n' \
+              "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" >> "$comp"; }
 count_shown() { HOME="$T" "$BIN" --dump | sed -n 's/.*compactions=\([0-9]*\).*/\1/p' | head -1; }
 [ "$(count_shown)" = 0 ] || fail "a session with no compaction reported $(count_shown)"
-printf '%s\n' "$boundary" >> "$comp"
+resumed
 [ "$(count_shown)" = 1 ] || fail "one compaction reported as $(count_shown)"
-printf '%s\n%s\n' "$boundary" "$boundary" >> "$comp"
+resumed; resumed
 [ "$(count_shown)" = 3 ] || fail "three compactions reported as $(count_shown)"
 
 # Where a session compacts is read from where it last compacted, not calculated from the
@@ -115,10 +120,26 @@ printf '%s\n%s\n' "$boundary" "$boundary" >> "$comp"
 # else entirely. Only an automatic compaction says anything — a hand-run /compact happens
 # wherever the user asked — and only a believable number, inside the range the slider can
 # produce.
+# Right after a compaction there is no usage yet, and reading past the boundary reports
+# the session as it was *before* it — measured once at 135,937 for a session then holding
+# 9,500, which the app read as near its limit and told to write the handover it had just
+# written. What the compaction left behind is the size until the next reply.
+after="$T/.claude/projects/-tmp-demo/aaaabbbb-cccc-dddd-eeee-ffff00001111.jsonl"
+now_iso=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
+{ printf '{"type":"assistant","entrypoint":"cli","cwd":"/tmp/after","timestamp":"%s","message":{"model":"claude-opus-5","usage":{"input_tokens":10,"cache_read_input_tokens":135937}}}\n' "$now_iso"
+  printf '{"type":"system","subtype":"compact_boundary","timestamp":"%s","compactMetadata":{"trigger":"auto","preTokens":135937,"postTokens":9500}}\n' "$now_iso"
+} > "$after"
+shown=$(HOME="$T" "$BIN" --dump | sed -n 's/.*aaaabb.*last_ctx=\([0-9]*\).*/\1/p' | head -1)
+[ "$shown" = 9500 ] || fail "a session just compacted reported $shown tokens, not what the compaction left"
+[ ! -f "$T/.usage-manager/alerts/aaaabbbb-cccc-dddd-eeee-ffff00001111.txt" ] || fail "warned a session that had just compacted"
+rm -f "$after"
+
 cp "$comp" "$comp.bak"   # these boundaries are this check's own; later checks count them
 measured() { HOME="$T" "$BIN" --dump | grep -o 'compact_at=[0-9]* measured' | head -1; }
 calculated() { HOME="$T" "$BIN" --dump | grep -c 'compact_at=[0-9]* from the setting'; }
-pre() { printf '{"type":"system","subtype":"compact_boundary","compactMetadata":{"trigger":"%s","preTokens":%s}}\n' "$1" "$2" >> "$comp"; }
+pre() { printf '{"type":"system","subtype":"compact_boundary","compactMetadata":{"trigger":"%s","preTokens":%s,"postTokens":30000}}\n' "$1" "$2" >> "$comp"
+        printf '{"type":"assistant","entrypoint":"cli","cwd":"/tmp/demo","timestamp":"%s","message":{"model":"claude-opus-5","usage":{"input_tokens":10,"cache_read_input_tokens":950000}}}\n' \
+          "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" >> "$comp"; }
 [ "$(calculated)" = 1 ] || fail "a session with no automatic compaction did not fall back to the setting"
 pre auto 832917
 [ "$(measured)" = "compact_at=832917 measured" ] || fail "the session's own compaction point reported as '$(measured)'"
