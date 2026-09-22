@@ -210,7 +210,12 @@ kill $APP 2>/dev/null || true; wait $APP 2>/dev/null || true
 [ ! -f "$T/.usage-manager/alerts/$KIMI.txt" ] || fail "a Codex/Kimi session was sent a notice"
 [ ! -f "$T/.usage-manager/alerts/$GPT.txt" ] || fail "a Codex/GPT session was sent a notice"
 if grep -q "ctx-$KIMI" "$T/app2.log"; then fail "a Codex session pushed a notification"; fi
-HOME="$T" "$BIN" --dump | grep -q "$KIMI" || true   # still listed, just not alerted
+# ...and they are not listed either: the quota row is what Codex is read for.
+out=$(HOME="$T" "$BIN" --dump)
+if echo "$out" | grep -q '^session.*Codex'; then fail "a Codex thread was listed among the sessions"; fi
+# (The Codex quota itself comes from the local proxy, which an offline run cannot
+# reach, so there is nothing to assert about it here — it is checked on the real
+# machine instead, where the row is present while no Codex thread is listed.)
 
 # PreCompact gate: decides at the moment of the compaction, with no help from the app.
 # Arming it in advance was a race the app lost by a second (a parallel tool call moves a

@@ -250,10 +250,12 @@ public final class LiveScanner: @unchecked Sendable {
             // Spawned subagent threads are skipped: nobody watches them, so an alert isn't actionable.
             guard let meta = CodexRollout.meta(path: path), !meta.isSubagent,
                   let t = CodexRollout.tail(path: path) else { return nil }
+            // Codex rollouts are read for the weekly quota only. Their threads are not
+            // listed: nothing is written into their prompts any more, their names are not
+            // recoverable the way a Claude session's is, and a row that can only be looked
+            // at is noise beside the ones that can be acted on.
             codexWeekly = newest(codexWeekly, t.weekly)
-            guard t.ctxTokens > 0 else { return nil }
-            return SessionCtx(tool: .codex, sessionId: meta.sessionId, project: Self.projectLabel(meta.cwd),
-                              model: t.model, ctxTokens: t.ctxTokens, windowSize: t.window, mtime: .distantPast)
+            return nil
         }
         // One large tool result can fill the usual tail on its own, leaving no usage in
         // reach — and then the session vanishes from the list until the next one arrives.

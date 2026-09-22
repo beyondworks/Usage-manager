@@ -263,8 +263,6 @@ final class AppModel: ObservableObject {
                        ctxTokens: 486_000, windowSize: 1_000_000, mtime: now, compactions: 1,
                        lastPostTokens: 31_000, handoverSaved: nil,
                        cacheTTL: 3600, lastReplyAt: now.addingTimeInterval(-3480), titleSource: "meta"),
-            SessionCtx(tool: .codex, sessionId: "demo03", project: "infra",
-                       model: "kimi/k3[1m]", ctxTokens: 274_000, windowSize: 996_147, mtime: now),
             SessionCtx(tool: .claudeCode, sessionId: "demo04", project: "docs",
                        title: "온보딩 문서", model: "claude-opus-5",
                        ctxTokens: 132_000, windowSize: 1_000_000, mtime: now.addingTimeInterval(-400),

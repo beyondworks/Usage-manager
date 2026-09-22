@@ -28,9 +28,15 @@ printf 'APPL????' > "$APP/Contents/PkgInfo"
 # named certificate instead ties the requirement to the identifier and that certificate,
 # so the grant survives a rebuild.
 #
-# Set UM_SIGN_ID to the certificate's common name to use it. A self-signed certificate
-# in the login keychain is enough; it is trusted only on this Mac, which is why release
-# builds stay ad-hoc (see make_release.sh) — elsewhere it would mean nothing.
+# Any named certificate will do — what matters is that the requirement stops being the
+# code hash. UM_SIGN_ID names one explicitly; otherwise an Apple Development
+# certificate on this Mac is used, which keeps anyone's certificate name out of the
+# repository. Release builds stay ad-hoc (see make_release.sh): a certificate that only
+# this Mac trusts would mean nothing to anyone downloading the DMG.
+if [ -z "${UM_SIGN_ID:-}" ]; then
+    UM_SIGN_ID="$(security find-identity -v -p codesigning 2>/dev/null \
+        | sed -n 's/.*"\(Apple Development: [^"]*\)".*/\1/p' | head -1)"
+fi
 if [ -n "${UM_SIGN_ID:-}" ] && codesign --force --sign "$UM_SIGN_ID" "$APP" 2>/dev/null; then
     echo "signed with $UM_SIGN_ID"
 else
