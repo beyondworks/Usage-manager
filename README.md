@@ -148,7 +148,7 @@ scripts/check_hooks.sh            # 자체검사 (임시 홈에서 훅 설치·�
 
 ## 릴리즈 전 점검
 
-1. `scripts/check_hooks.sh` 통과
+1. `scripts/check_hooks.sh` 와 `scripts/check_rows.sh` 통과
 2. 설치본에서 실제 동작 확인 — 화면은 `--snap`, 판단은 `--dump`
 3. **README 서술이 현재 동작과 맞는가**
 4. **스크린샷이 현재 UI인가** — `USAGE_MANAGER_DEMO=1 .build/debug/UsageManager --snap docs/screenshot.png` (데모 모드라 실제 계정 값과 세션 이름이 들어가지 않는다)
