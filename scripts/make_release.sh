@@ -33,6 +33,10 @@ package() {  # package <arch> <label>
     cp AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
     printf 'APPL????' > "$app/Contents/PkgInfo"
     # Ad-hoc signature: gives the bundle a stable identity for the login-item API.
+    # Release builds stay ad-hoc on purpose. A locally created certificate is trusted
+    # only on the Mac that made it, so signing with one would mean nothing to anyone
+    # downloading the DMG — and an unknown signer reads worse than no signer at all.
+    # (make_app.sh, which builds what gets installed here, can use one: see UM_SIGN_ID.)
     codesign --force --sign - "$app" >/dev/null 2>&1 || true
 
     local stage="$DIST/dmg-$label"

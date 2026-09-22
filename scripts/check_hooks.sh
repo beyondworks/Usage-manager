@@ -16,18 +16,37 @@ cat > "$T/.claude/settings.json" <<'EOF'
  "env":{"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE":"72","KEEP_ME":"1"},
  "hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"echo user-hook"}]}]}}
 EOF
-echo '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo codex-stop"}]}]}}' > "$T/.codex/hooks.json"
+# Codex is no longer a target, but earlier versions installed here. Start with one of
+# ours in place, appended after someone else's, and check that it goes and they stay.
+cat > "$T/.codex/hooks.json" <<EOF
+{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo codex-stop"}]}],
+ "UserPromptSubmit":[{"hooks":[{"type":"command","command":"echo other-first"}]},
+                     {"hooks":[{"type":"command","command":"/bin/sh $T/.usage-manager/bin/ctx-hook.sh"}]}],
+ "PostToolUse":[{"hooks":[{"type":"command","command":"echo other-first"}]},
+                {"hooks":[{"type":"command","command":"/bin/sh $T/.usage-manager/bin/ctx-hook.sh"}]}]}}
+EOF
 chmod 600 "$T/.codex/hooks.json"
 
-HOME="$T" "$BIN" --hooks on | grep -q 'claude: true, codex: true' || fail "install status"
+HOME="$T" "$BIN" --hooks on | grep -q 'claude: true' || fail "install status"
 grep -q 'echo user-hook' "$T/.claude/settings.json" || fail "user hook dropped"
-grep -q 'codex-stop' "$T/.codex/hooks.json" || fail "codex hook dropped"
+grep -q 'codex-stop' "$T/.codex/hooks.json" || fail "someone else's Codex hook dropped"
 [ "$(stat -f %Lp "$T/.codex/hooks.json")" = 600 ] || fail "hooks.json permissions changed"
+# Ours is gone from Codex, and the hooks that were there keep their position — Codex
+# records trust against the index, so a shift would silently untrust someone else.
+grep -q usage-manager "$T/.codex/hooks.json" && fail "install left our hook in Codex"
+python3 - "$T/.codex/hooks.json" <<'EOF' || fail "other Codex hooks moved or vanished"
+import json, sys
+d = json.load(open(sys.argv[1]))["hooks"]
+for ev in ("UserPromptSubmit", "PostToolUse"):
+    groups = d.get(ev) or []
+    assert len(groups) == 1, f"{ev}: expected one group left, got {len(groups)}"
+    assert "other-first" in json.dumps(groups[0]), f"{ev}: the wrong group survived"
+EOF
 HOME="$T" "$BIN" --hooks on >/dev/null   # idempotent
 [ "$(grep -c ctx-hook.sh "$T/.claude/settings.json")" = 2 ] || fail "expected one hook per event, no duplicates"
 for ev in UserPromptSubmit PostToolUse; do
   python3 -c "import json,sys;d=json.load(open(sys.argv[1]));sys.exit(0 if any('ctx-hook' in json.dumps(g) for g in d['hooks'][sys.argv[2]]) else 1)" "$T/.claude/settings.json" $ev || fail "claude $ev hook missing"
-  python3 -c "import json,sys;d=json.load(open(sys.argv[1]));sys.exit(0 if any('ctx-hook' in json.dumps(g) for g in d['hooks'][sys.argv[2]]) else 1)" "$T/.codex/hooks.json" $ev || fail "codex $ev hook missing"
+  true
 done
 
 # statusLine: replaced even when the old command shares our file name, snapshot + chain
@@ -130,8 +149,9 @@ EOF
 HOME="$T" "$BIN" --dump | grep -q 'session Claude Code 데모 세션 ' || fail "hand-written tally not dropped from the label"
 if HOME="$T" "$BIN" --dump | grep -q '(2/3)'; then fail "the hand-written tally is still displayed"; fi
 
-# model-level alert filter: Codex hosts both GPT (258k window) and Kimi (996k), so a
-# Codex thread is alerted only when it runs Kimi.
+# Codex threads are listed and their quota read, but nothing is written into their
+# prompts: Codex records no compaction for the gate to hold, and no hook is installed
+# there any more. Neither model gets a notice.
 codex_session() {  # codex_session <session-id> <model>
   d="$T/.codex/sessions/$(date -u +%Y/%m/%d)"; mkdir -p "$d"
   ts=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
@@ -147,11 +167,12 @@ codex_session "$KIMI" "kimi/k3[1m]"
 rm -f "$T/.usage-manager/alerts/"*.txt
 HOME="$T" "$BIN" > "$T/app2.log" 2>&1 &
 APP=$!
-for _ in $(seq 1 40); do [ -f "$T/.usage-manager/alerts/$KIMI.txt" ] && break; sleep 0.5; done
+sleep 6   # long enough for a notice to have been written, if one were going to be
 kill $APP 2>/dev/null || true; wait $APP 2>/dev/null || true
-[ -f "$T/.usage-manager/alerts/$KIMI.txt" ] || fail "Kimi session near its compaction point got no notice"
-[ ! -f "$T/.usage-manager/alerts/$GPT.txt" ] || fail "GPT-model Codex session should not be alerted"
-grep -q "ctx-$GPT" "$T/app2.log" && fail "GPT-model session pushed a notification"
+[ ! -f "$T/.usage-manager/alerts/$KIMI.txt" ] || fail "a Codex/Kimi session was sent a notice"
+[ ! -f "$T/.usage-manager/alerts/$GPT.txt" ] || fail "a Codex/GPT session was sent a notice"
+if grep -q "ctx-$KIMI" "$T/app2.log"; then fail "a Codex session pushed a notification"; fi
+HOME="$T" "$BIN" --dump | grep -q "$KIMI" || true   # still listed, just not alerted
 
 # PreCompact gate: decides at the moment of the compaction, with no help from the app.
 # Arming it in advance was a race the app lost by a second (a parallel tool call moves a
@@ -329,13 +350,14 @@ python3 -c "import json,sys;d=json.load(open(sys.argv[1]));sys.exit(0 if d.get('
 python3 -c "import json,sys;d=json.load(open(sys.argv[1]));sys.exit(0 if any('precompact-gate' in json.dumps(g) for g in d['hooks']['PreCompact']) else 1)" "$T/.claude/settings.json" \
   || fail "gate hook not registered"
 
-HOME="$T" "$BIN" --hooks off | grep -q 'claude: false, codex: false' || fail "uninstall status"
+HOME="$T" "$BIN" --hooks off | grep -q 'claude: false' || fail "uninstall status"
 grep -q 'PREV-STATUS' "$T/.claude/settings.json" || fail "statusLine not restored"
 python3 -c "import json,sys;d=json.load(open(sys.argv[1]));e=d.get('env',{});sys.exit(0 if e.get('CLAUDE_AUTOCOMPACT_PCT_OVERRIDE')=='72' and e.get('KEEP_ME')=='1' else 1)" "$T/.claude/settings.json" \
   || fail "the user's own compaction point was not restored"
 ! grep -q 'precompact-gate' "$T/.claude/settings.json" || fail "gate hook left behind"
 grep -q 'echo user-hook' "$T/.claude/settings.json" || fail "user hook lost on uninstall"
-! grep -q ctx-hook "$T/.codex/hooks.json" || fail "codex hook left behind"
+! grep -q usage-manager "$T/.codex/hooks.json" || fail "our hook left behind in Codex"
+grep -q 'codex-stop' "$T/.codex/hooks.json" || fail "uninstall removed someone else's Codex hook"
 # the app must arm before Claude Code's own compaction point, or the compaction it is
 # meant to hold has already begun. Goes through the app's real alert path.
 HOME="$T" "$BIN" --arm-check || fail "app arms at or after Claude Code's compaction point"

@@ -52,13 +52,11 @@ public struct SessionCtx: Sendable, Identifiable, Equatable {
     public var isIdle: Bool { Date().timeIntervalSince(mtime) > 3 * 60 }
     public var shortId: String { String(sessionId.prefix(6)) }
 
-    /// Whether a compaction notice is worth sending. Every Claude Code session counts,
-    /// and so does a Codex thread running Kimi (measured window 996k). GPT-model Codex
-    /// threads run in a 258k window and compact on their own, so they are left alone.
-    /// Codex hosts both, so this keys on the model, not the tool.
-    public var wantsCompactionAlert: Bool {
-        tool == .claudeCode || model.lowercased().contains("kimi")
-    }
+    /// Whether a compaction notice is worth sending. Claude Code only: Codex threads
+    /// are still listed and their quota still shown, but nothing is written into their
+    /// prompts. Codex records no compaction of its own for the gate to hold, and the
+    /// hook it would need is no longer installed there.
+    public var wantsCompactionAlert: Bool { tool == .claudeCode }
     /// The count used to be written into the session name by hand ("Argo - 총괄 (0/3)"),
     /// so that tail is dropped from what is displayed now that the app supplies it. The
     /// session's own title is never modified.

@@ -263,7 +263,7 @@ final class AppModel: ObservableObject {
                        ctxTokens: 132_000, windowSize: 1_000_000, mtime: now.addingTimeInterval(-400)),
         ]
         tools = [.claudeCode, .codex]
-        hooks = Hooks.Status(claude: true, codex: true, codexTrusted: true)
+        hooks = Hooks.Status(claude: true)
     }
 
     /// One line per limit lookup in `~/.usage-manager/usage.log`, so the poll interval

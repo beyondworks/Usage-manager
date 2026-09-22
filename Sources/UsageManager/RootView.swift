@@ -348,23 +348,18 @@ struct RootView: View {
     }
 
     private var hookRow: some View {
-        let connected = model.hooks.claude || model.hooks.codex
-        let needsTrust = model.hooks.codex && !model.hooks.codexTrusted
+        // Claude Code only. Codex threads are still listed and their quota still read,
+        // but nothing is written into their prompts and no hook is installed there.
+        let connected = model.hooks.claude
         return VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
                 Label("에이전트 훅", systemImage: "link").font(.system(size: 12, weight: .medium))
-                    .help("Claude Code statusLine(주간 한도 수집)과 UserPromptSubmit 훅(Claude Code·Codex)을 설치합니다. 기준을 넘은 세션은 다음 프롬프트에서 에이전트가 압축 권고를 전달받습니다.")
+                    .help("Claude Code의 statusLine(주간 한도 수집), 프롬프트·도구 호출 훅(압축 알림), 압축 직전 훅(핸드오버 보류)을 설치합니다.")
                 Spacer()
                 hookChip(.claudeCode, model.hooks.claude)
-                hookChip(.codex, model.hooks.codex && model.hooks.codexTrusted)
                 pillSwitch(connected) { model.setHooks(!connected) }
             }
             .padding(.horizontal, 14).frame(height: 36)
-            if needsTrust {
-                Text("Codex에서 /hooks 로 Usage Manager 훅을 한 번 신뢰(trust)해 주세요")
-                    .font(.system(size: 10, weight: .medium)).foregroundStyle(.white.opacity(0.7))
-                    .padding(.horizontal, 14).padding(.bottom, 10)
-            }
             if let e = model.hookError {
                 Text(e).font(.system(size: 10)).foregroundStyle(.white.opacity(0.7)).padding(.horizontal, 14).padding(.bottom, 10)
             }

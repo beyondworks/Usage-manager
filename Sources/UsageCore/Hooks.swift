@@ -98,38 +98,13 @@ public enum Hooks {
 
     public struct Status: Sendable, Equatable {
         public var claude = false
-        public var codex = false
-        public var codexTrusted = false   // Codex skips a new hook until the user trusts it (`/hooks`)
-        public init(claude: Bool = false, codex: Bool = false, codexTrusted: Bool = false) {
-            self.claude = claude; self.codex = codex; self.codexTrusted = codexTrusted
-        }
+        public init(claude: Bool = false) { self.claude = claude }
     }
 
     public static func status() -> Status {
         let claude = readJSON(claudeSettings)
-        let codex = readJSON(codexHooks)
         let status = (claude?["statusLine"] as? [String: Any])?["command"] as? String ?? ""
-        return Status(claude: status == statusCommand && hasPromptHook(claude) && hasGateHook(claude),
-                      codex: hasPromptHook(codex), codexTrusted: codexTrusted(codex))
-    }
-
-    /// Codex records trust per hook as `[hooks.state."<hooks.json>:<event>:<group>:<hook>"]`
-    /// in config.toml; our slot's key must be present for every event we registered.
-    private static func codexTrusted(_ root: [String: Any]?) -> Bool {
-        guard let toml = try? String(contentsOfFile: Paths.home + "/.codex/config.toml", encoding: .utf8) else { return false }
-        return promptEvents.allSatisfy { event in
-            let list = ((root?["hooks"] as? [String: Any])?[event] as? [[String: Any]]) ?? []
-            guard let idx = list.firstIndex(where: isOurs) else { return false }
-            return toml.contains("[hooks.state.\"\(codexHooks):\(snakeCase(event)):\(idx):0\"]")
-        }
-    }
-
-    /// "PostToolUse" → "post_tool_use", the spelling Codex uses for trust keys.
-    private static func snakeCase(_ event: String) -> String {
-        event.reduce(into: "") { out, c in
-            if c.isUppercase && !out.isEmpty { out += "_" }
-            out.append(Character(c.lowercased()))
-        }
+        return Status(claude: status == statusCommand && hasPromptHook(claude) && hasGateHook(claude))
     }
 
     // MARK: - Install / uninstall
@@ -150,9 +125,17 @@ public enum Hooks {
             if let pct = compactAt { s = setCompactPercent(s, pct) }
             try writeJSON(s, to: claudeSettings)
         }
-        if FileManager.default.fileExists(atPath: Paths.home + "/.codex") {
-            try writeJSON(addPromptHook(readJSON(codexHooks) ?? [:]), to: codexHooks)
-        }
+        try clearCodex()
+    }
+
+    /// Codex is no longer a target. Earlier versions installed the prompt hook there
+    /// too, so both install and uninstall take it back out — whichever runs first
+    /// leaves nothing of ours behind. Our entries were appended last in each event, so
+    /// removing them leaves every other hook's index, and the trust keys Codex records
+    /// against those indices, untouched.
+    private static func clearCodex() throws {
+        guard let c = readJSON(codexHooks), hasPromptHook(c) else { return }
+        try writeJSON(removePromptHook(c), to: codexHooks)
     }
 
     public static func uninstall() throws {
@@ -163,7 +146,7 @@ public enum Hooks {
             }
             try writeJSON(clearCompactPercent(removeGateHook(removePromptHook(s))), to: claudeSettings)
         }
-        if let c = readJSON(codexHooks) { try writeJSON(removePromptHook(c), to: codexHooks) }
+        try clearCodex()
     }
 
     /// Queue a notice for `sessionId`; `ctx-hook.sh` hands it over on the session's next

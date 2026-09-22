@@ -49,6 +49,20 @@ public enum ClaudeUsage {
 
     public static var backoffUntil: Date { backoff.until }
 
+    /// Appends one line to `~/.usage-manager/usage.log`, beside the app's own entries.
+    static func note(_ text: String) {
+        let path = Paths.root + "/usage.log"
+        let line = ISO8601DateFormatter().string(from: Date()) + " " + text + "\n"
+        guard let fh = FileHandle(forWritingAtPath: path) else {
+            try? FileManager.default.createDirectory(atPath: Paths.root, withIntermediateDirectories: true)
+            try? line.write(toFile: path, atomically: true, encoding: .utf8)
+            return
+        }
+        defer { try? fh.close() }
+        _ = try? fh.seekToEnd()
+        try? fh.write(contentsOf: Data(line.utf8))
+    }
+
     /// A short, non-reversible stand-in for a token, safe to write to disk and logs.
     static func fingerprint(_ token: String) -> String {
         var h: UInt64 = 0xcbf29ce484222325
@@ -89,6 +103,7 @@ public enum ClaudeUsage {
                 return q
             case .expired:
                 rejected += 1
+                forgetKeychain()   // whatever was cached is no longer accepted
             case .limited(let wait, let reason):
                 backoff = (Date().addingTimeInterval(wait), fingerprint(token))
                 lastDiagnosis = "http 429, waiting \(Int(wait))s — \(reason)"
@@ -202,7 +217,17 @@ public enum ClaudeUsage {
         return found
     }
 
+    /// Kept in memory for as long as it is valid. Each read is a keychain access, and
+    /// macOS asks the user to approve one whenever the app's signature has changed —
+    /// which, with an ad-hoc signature, is every build. Reading once an hour instead of
+    /// every five minutes is the difference between a prompt a day and twelve.
+    private nonisolated(unsafe) static var cachedKeychain: (token: String, until: Date)?
+
+    /// Called when the endpoint rejects a credential: whatever is cached is stale.
+    static func forgetKeychain() { cachedKeychain = nil }
+
     static func keychainToken() -> String? {
+        if let c = cachedKeychain, c.until > Date() { return c.token }
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: "Claude Code-credentials",
@@ -211,8 +236,16 @@ public enum ClaudeUsage {
         ]
         var item: CFTypeRef?
         guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
-              let data = item as? Data else { return nil }
-        return oauthToken(in: data)
+              let data = item as? Data,
+              let entry = oauthEntry(in: data) else { return nil }
+        // Re-read shortly before it lapses, and at least every ten minutes, so a
+        // credential rotated early is still picked up without asking on every poll.
+        let until = min(entry.expires, Date().addingTimeInterval(3600))
+        cachedKeychain = (entry.token, max(Date().addingTimeInterval(600), until.addingTimeInterval(-60)))
+        // One line per actual read, so the caching can be checked from the log without
+        // anything sensitive in it: a fingerprint, never the credential.
+        note("keychain read (fingerprint \(fingerprint(entry.token)))")
+        return entry.token
     }
 
     /// Same shape, for installs that keep it in a file instead.
@@ -222,14 +255,16 @@ public enum ClaudeUsage {
         return [t]
     }
 
-    private static func oauthToken(in data: Data) -> String? {
+    private static func oauthToken(in data: Data) -> String? { oauthEntry(in: data)?.token }
+
+    private static func oauthEntry(in data: Data) -> (token: String, expires: Date)? {
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let oauth = obj["claudeAiOauth"] as? [String: Any],
               let token = oauth["accessToken"] as? String, token.count > 20 else { return nil }
-        // An expired token is worse than none: it is what answers 401 in a loop.
-        if let ms = (oauth["expiresAt"] as? NSNumber)?.doubleValue,
-           Date(timeIntervalSince1970: ms / 1000) <= Date() { return nil }
-        return token
+        // Expired is worse than absent: it is what answers 401 in a loop.
+        let expires = (oauth["expiresAt"] as? NSNumber).map { Date(timeIntervalSince1970: $0.doubleValue / 1000) }
+        if let e = expires, e <= Date() { return nil }
+        return (token, expires ?? Date().addingTimeInterval(3600))
     }
 
     /// Pull the OAuth token out of a live `claude` process's environment (same user).
