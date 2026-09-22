@@ -140,13 +140,51 @@ printf '%s\n' '{"type":"system","subtype":"compact_boundary","compactMetadata":{
 [ "$(clear_shown 9)" = false ] || fail "a later, smaller summary still suggested clearing"
 
 
+# Desktop sessions take their name, and their right to be listed at all, from the
+# app's own metadata. Clearing a session starts a new transcript and repoints the
+# metadata; the replaced file stays on disk and must not linger beside its successor.
+META="$T/Library/Application Support/Claude Second/claude-code-sessions/acct/org"
+mkdir -p "$META"
+desk_session() {  # desk_session <session-id> <tokens>
+  d="$T/.claude/projects/-tmp-desk"; mkdir -p "$d"
+  printf '{"type":"assistant","entrypoint":"claude-desktop","cwd":"/tmp/desk","message":{"model":"claude-opus-5","usage":{"input_tokens":0,"cache_read_input_tokens":%s}}}\n' "$2" > "$d/$1.jsonl"
+  printf '{"type":"user","message":{"content":[{"type":"text","text":"x"}]},"origin":{"kind":"human"}}\n' >> "$d/$1.jsonl"
+}
+desk_meta() {  # desk_meta <file> <session-id> <title> <archived>
+  printf '{"cliSessionId":"%s","title":"%s","isArchived":%s,"lastActivityAt":%s000}\n' \
+    "$2" "$3" "$4" "$(date +%s)" > "$META/local_$1.json"
+}
+NEW=aaaaaaaa-1111-2222-3333-444444444444
+OLD=bbbbbbbb-1111-2222-3333-444444444444
+GONE=cccccccc-1111-2222-3333-444444444444
+desk_session "$NEW" 300000; desk_session "$OLD" 400000; desk_session "$GONE" 500000
+desk_meta one "$NEW" "작업 중인 세션" false
+desk_meta two "$OLD" "보관된 세션" true
+# GONE 은 어떤 메타데이터도 가리키지 않는다 — clear 로 대체된 옛 기록
+out=$(HOME="$T" "$BIN" --dump)
+echo "$out" | grep -q '작업 중인 세션' || fail "desktop title not taken from the app's metadata"
+echo "$out" | grep -q 'title_from=meta' || fail "title source not reported as meta"
+if echo "$out" | grep -q "session\[$(echo "$OLD" | cut -c1-6)\]"; then fail "an archived session was listed"; fi
+if echo "$out" | grep -q "session\[$(echo "$GONE" | cut -c1-6)\]"; then fail "a replaced transcript was still listed"; fi
+
+# ...and with no metadata at all, nothing is hidden — including the one that looked
+# replaced a moment ago, since "replaced" can only be read off metadata we can see.
+AWAY="$T/meta-away"
+mv "$T/Library/Application Support/Claude Second/claude-code-sessions" "$AWAY"
+out=$(HOME="$T" "$BIN" --dump)
+seen=$(echo "$out" | grep -c 'Claude Code desk ')
+mv "$AWAY" "$T/Library/Application Support/Claude Second/claude-code-sessions"
+[ "$seen" = 3 ] || fail "no metadata: expected all three sessions to stay listed, got $seen"
+echo "$out" | grep -q 'title_from=folder' || fail "no metadata: expected the folder name to be used"
+rm -rf "$T/.claude/projects/-tmp-desk"
+
 # the hand-written tally in a session name is dropped from the label, not from the title
 python3 - "$comp" <<'EOF'
 import json, sys
 p = sys.argv[1]
 open(p, 'a').write(json.dumps({"type": "custom-title", "customTitle": "데모 세션 (2/3)"}) + "\n")
 EOF
-HOME="$T" "$BIN" --dump | grep -q 'session Claude Code 데모 세션 ' || fail "hand-written tally not dropped from the label"
+HOME="$T" "$BIN" --dump | grep -q 'Claude Code 데모 세션 ' || fail "hand-written tally not dropped from the label"
 if HOME="$T" "$BIN" --dump | grep -q '(2/3)'; then fail "the hand-written tally is still displayed"; fi
 
 # Codex threads are listed and their quota read, but nothing is written into their

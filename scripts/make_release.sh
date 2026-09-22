@@ -12,6 +12,14 @@ VER="$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' scripts/Inf
 DIST="$ROOT/dist"
 rm -rf "$DIST"; mkdir -p "$DIST"
 
+# The README and its screenshot describe what this build does; a release where
+# neither moved since the last tag usually means they were forgotten. A warning, not
+# a gate — a release can legitimately change nothing a reader would see.
+LAST_TAG="$(git describe --tags --abbrev=0 2>/dev/null || true)"
+if [ -n "$LAST_TAG" ] && git diff --quiet "$LAST_TAG" -- README.md docs/screenshot.png 2>/dev/null; then
+    echo "warning: README.md and docs/screenshot.png are unchanged since $LAST_TAG — still current?" >&2
+fi
+
 echo "building universal binary (arm64 + x86_64)…"
 swift build -c release --arch arm64 --arch x86_64 >/dev/null
 FAT="$(find "$ROOT/.build" -path '*Products/Release/UsageManager' -type f -perm +111 | head -1)"

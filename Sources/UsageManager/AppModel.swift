@@ -82,7 +82,10 @@ final class AppModel: ObservableObject {
         // reset countdowns, and runs the scanner's periodic full scan.
         let home = Paths.home
         try? FileManager.default.createDirectory(atPath: Paths.claudeStatus, withIntermediateDirectories: true)
-        watcher = FileWatcher(paths: [home + "/.claude/projects", home + "/.codex/sessions", Paths.claudeStatus],
+        // The desktop app's session metadata is watched too, so a rename or a cleared
+        // session shows up as soon as it happens rather than at the next full scan.
+        watcher = FileWatcher(paths: [home + "/.claude/projects", home + "/.codex/sessions", Paths.claudeStatus]
+                                + DesktopSessions.directories(home: home),
                               latency: 1.0) { [weak self] paths in
             MainActor.assumeIsolated { self?.refresh(changed: paths) }
         }
@@ -245,7 +248,7 @@ final class AppModel: ObservableObject {
             ProviderQuota(provider: "anthropic", weeklyPercent: 38, fiveHourPercent: 21,
                           resetsAt: now.addingTimeInterval(4.2 * 86400), updatedAt: now),
             ProviderQuota(provider: "openai", weeklyPercent: 86, fiveHourPercent: nil,
-                          resetsAt: now.addingTimeInterval(2.5 * 86400), updatedAt: now),
+                          resetsAt: now.addingTimeInterval(2.5 * 86400), updatedAt: now.addingTimeInterval(-180)),
             ProviderQuota(provider: "kimi", weeklyPercent: 64, fiveHourPercent: 55,
                           resetsAt: now.addingTimeInterval(5.1 * 86400), updatedAt: now),
         ]
@@ -253,14 +256,19 @@ final class AppModel: ObservableObject {
             SessionCtx(tool: .claudeCode, sessionId: "demo01", project: "storefront",
                        title: "결제 리팩터링", model: "claude-opus-5",
                        ctxTokens: 871_000, windowSize: 1_000_000, mtime: now, compactions: 3,
-                       lastPostTokens: 38_000, handoverSaved: true),
+                       lastPostTokens: 38_000, handoverSaved: true,
+                       cacheTTL: 3600, lastReplyAt: now.addingTimeInterval(-120), titleSource: "meta"),
             SessionCtx(tool: .claudeCode, sessionId: "demo02", project: "api-gateway",
-                       model: "claude-opus-5", ctxTokens: 486_000, windowSize: 1_000_000, mtime: now, compactions: 1),
+                       title: "검색 색인 재구축", model: "claude-opus-5",
+                       ctxTokens: 486_000, windowSize: 1_000_000, mtime: now, compactions: 1,
+                       lastPostTokens: 31_000, handoverSaved: nil,
+                       cacheTTL: 3600, lastReplyAt: now.addingTimeInterval(-3480), titleSource: "meta"),
             SessionCtx(tool: .codex, sessionId: "demo03", project: "infra",
                        model: "kimi/k3[1m]", ctxTokens: 274_000, windowSize: 996_147, mtime: now),
             SessionCtx(tool: .claudeCode, sessionId: "demo04", project: "docs",
                        title: "온보딩 문서", model: "claude-opus-5",
-                       ctxTokens: 132_000, windowSize: 1_000_000, mtime: now.addingTimeInterval(-400)),
+                       ctxTokens: 132_000, windowSize: 1_000_000, mtime: now.addingTimeInterval(-400),
+                       cacheTTL: 3600, lastReplyAt: now.addingTimeInterval(-400), titleSource: "meta"),
         ]
         tools = [.claudeCode, .codex]
         hooks = Hooks.Status(claude: true)

@@ -23,6 +23,9 @@ public struct SessionCtx: Sendable, Identifiable, Equatable {
     /// How many times this transcript has been compacted. Claude Code only — Codex
     /// rollouts record no compaction event.
     public let compactions: Int
+    /// Where `title` came from, for `--dump`: the desktop app's own metadata, the
+    /// transcript's rename line, or nothing (the folder name is then used).
+    public let titleSource: String
     /// How long the server keeps this session's prompt cache, and when the session
     /// last got a reply. Re-reading a cached prompt is cheap; once the cache lapses the
     /// next message writes the whole context again, which is what the quota feels.
@@ -102,12 +105,13 @@ public struct SessionCtx: Sendable, Identifiable, Equatable {
     public init(tool: ToolKind = .claudeCode, sessionId: String, project: String, title: String? = nil,
                 model: String, ctxTokens: Int, windowSize: Int, mtime: Date, compactions: Int = 0,
                 lastPostTokens: Int = 0, handoverSaved: Bool? = nil,
-                cacheTTL: TimeInterval = 0, lastReplyAt: Date? = nil) {
+                cacheTTL: TimeInterval = 0, lastReplyAt: Date? = nil, titleSource: String = "folder") {
         self.tool = tool; self.sessionId = sessionId; self.project = project; self.title = title
         self.model = model; self.ctxTokens = ctxTokens; self.windowSize = windowSize; self.mtime = mtime
         self.compactions = compactions
         self.lastPostTokens = lastPostTokens; self.handoverSaved = handoverSaved
         self.cacheTTL = cacheTTL; self.lastReplyAt = lastReplyAt
+        self.titleSource = titleSource
     }
 }
 
@@ -135,6 +139,7 @@ public final class LiveScanner: @unchecked Sendable {
     private var parsed: [String: (size: UInt64, s: SessionCtx?)] = [:]
     private var human: [String: (offset: UInt64, yes: Bool)] = [:]
     private var compacted: [String: (offset: UInt64, count: Int, post: Int)] = [:]
+    private let desktop = DesktopSessions()
     private var claudeWeekly: Limit?
     private var codexWeekly: Limit?
     private var lastFull = Date.distantPast
@@ -147,6 +152,7 @@ public final class LiveScanner: @unchecked Sendable {
     /// `changed == nil` → rescan what's known (and a full scan when due).
     public func scan(changed: [String]? = nil) -> LiveSnapshot {
         if Date().timeIntervalSince(lastFull) > fullEvery { fullScan() }
+        desktop.refresh()
         for p in changed ?? [] { touch(p) }
         let cutoff = Date().addingTimeInterval(-windowMinutes * 60)
         var sessions: [SessionCtx] = []
@@ -258,12 +264,23 @@ public final class LiveScanner: @unchecked Sendable {
         let sid = String((path as NSString).lastPathComponent.dropLast(6))
         let c = compactionScan(path: path)
         guard isHumanAttended(entrypoint: t.entrypoint, path: path) else { return nil }
-        return SessionCtx(tool: .claudeCode, sessionId: sid, project: Self.projectLabel(t.cwd), title: t.title,
+
+        // A desktop session's name lives in the app's metadata, which also says whether
+        // this transcript is still the one that session writes to. Clearing a session
+        // starts a new transcript and repoints the metadata; the old file stays on disk
+        // and would otherwise sit in the list beside its replacement.
+        var title = t.title
+        var source = t.title == nil ? "folder" : "custom-title"
+        if t.entrypoint == "claude-desktop", desktop.usable {
+            guard let m = desktop.meta(sid), !m.archived else { return nil }
+            if !m.title.isEmpty { title = m.title; source = "meta" }
+        }
+        return SessionCtx(tool: .claudeCode, sessionId: sid, project: Self.projectLabel(t.cwd), title: title,
                           model: t.model, ctxTokens: t.ctxTokens,
                           windowSize: claudeWindow(sid: sid, model: t.model, ctx: t.ctxTokens), mtime: .distantPast,
                           compactions: c.count, lastPostTokens: c.postTokens,
                           handoverSaved: Self.handoverSaved(sid: sid),
-                          cacheTTL: t.cacheTTL, lastReplyAt: t.repliedAt)
+                          cacheTTL: t.cacheTTL, lastReplyAt: t.repliedAt, titleSource: source)
     }
 
     /// Only human-attended sessions belong in the list. Transcript `entrypoint`:
@@ -471,6 +488,6 @@ private extension SessionCtx {
         SessionCtx(tool: tool, sessionId: sessionId, project: project, title: title, model: model,
                    ctxTokens: ctxTokens, windowSize: windowSize, mtime: mtime, compactions: compactions,
                    lastPostTokens: lastPostTokens, handoverSaved: handoverSaved,
-                   cacheTTL: cacheTTL, lastReplyAt: lastReplyAt)
+                   cacheTTL: cacheTTL, lastReplyAt: lastReplyAt, titleSource: titleSource)
     }
 }
