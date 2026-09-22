@@ -96,7 +96,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             print("quota \(ProviderMeta.name(q.provider)) [\(q.provider)]: weekly=\(q.weeklyPercent.map{String(Int($0))} ?? "-")% 5h=\(q.fiveHourPercent.map{String(Int($0))} ?? "-")% resets=\(q.resetsAt.map{"\($0)"} ?? "-")")
         }
         for s in snap.sessions {
-            print("session \(s.tool.display) \(s.label) \(Int(s.usedPercent))% \(s.ctxTokens)/\(s.windowSize) \(s.model) idle=\(s.isIdle)")
+            print("session \(s.tool.display) \(s.label) \(Int(s.usedPercent))% \(s.ctxTokens)/\(s.windowSize) \(s.model) compactions=\(s.compactions) idle=\(s.isIdle)")
         }
         print("hooks:", Hooks.status())
     }

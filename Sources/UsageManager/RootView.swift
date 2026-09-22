@@ -226,13 +226,23 @@ struct RootView: View {
             ToolLogo.view(s.tool, size: 16)
             Text(s.label).font(.system(size: 12, weight: .medium)).lineLimit(1)
         } trailing: {
+            // Compactions so far against the yardstick the user works to. Codex records
+            // no compaction, so its rows carry no count.
+            if s.tool == .claudeCode {
+                let spent = s.compactions >= model.compactLimit
+                Text("\(s.compactions)/\(model.compactLimit)")
+                    .font(.system(size: 11, weight: spent ? .bold : .regular).monospacedDigit())
+                    .foregroundStyle(.white.opacity(spent ? 0.9 : 0.4))
+                    .contentTransition(.numericText())
+                    .animation(.ui, value: s.compactions)
+            }
             Text("\(Int(s.usedPercent))%").font(.system(size: 12, weight: over ? .heavy : .semibold).monospacedDigit())
                 .contentTransition(.numericText())
                 .animation(.ui, value: Int(s.usedPercent))
         }
         .opacity(s.isIdle ? 0.45 : 1)
         .animation(.ui, value: s.isIdle)
-        .help("\(s.tool.display) · \(s.model) · \(s.ctxTokens.formatted())/\(s.windowSize.formatted()) tokens · \(s.shortId)\(s.isIdle ? " · 유휴" : "")")
+        .help("\(s.tool.display) · \(s.model) · \(s.ctxTokens.formatted())/\(s.windowSize.formatted()) tokens · 압축 \(s.compactions)회 · \(s.shortId)\(s.isIdle ? " · 유휴" : "")")
     }
 
     // MARK: Compaction alerts

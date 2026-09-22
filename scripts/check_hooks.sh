@@ -79,6 +79,27 @@ grep -q '묻지 말고' "$T/.usage-manager/alerts/$SID2.txt" || fail "queued not
 probe "$SID2" PostToolUse | grep -q 'SESSION_HANDOVER' || fail "app-queued notice not delivered to the agent"
 grep -q '\[notify\]' "$T/app.log" || fail "no push fired"
 
+# Compactions per session: one `compact_boundary` line each. Each --dump is a fresh
+# process, so this checks the count itself; the incremental cache inside a running app
+# only engages when a file grows, and is not exercised here.
+comp="$T/.claude/projects/-tmp-demo/$SID2.jsonl"
+boundary='{"type":"system","subtype":"compact_boundary","compactMetadata":{"trigger":"auto"}}'
+count_shown() { HOME="$T" "$BIN" --dump | sed -n 's/.*compactions=\([0-9]*\).*/\1/p' | head -1; }
+[ "$(count_shown)" = 0 ] || fail "a session with no compaction reported $(count_shown)"
+printf '%s\n' "$boundary" >> "$comp"
+[ "$(count_shown)" = 1 ] || fail "one compaction reported as $(count_shown)"
+printf '%s\n%s\n' "$boundary" "$boundary" >> "$comp"
+[ "$(count_shown)" = 3 ] || fail "three compactions reported as $(count_shown)"
+
+# the hand-written tally in a session name is dropped from the label, not from the title
+python3 - "$comp" <<'EOF'
+import json, sys
+p = sys.argv[1]
+open(p, 'a').write(json.dumps({"type": "custom-title", "customTitle": "데모 세션 (2/3)"}) + "\n")
+EOF
+HOME="$T" "$BIN" --dump | grep -q 'session Claude Code 데모 세션 ' || fail "hand-written tally not dropped from the label"
+if HOME="$T" "$BIN" --dump | grep -q '(2/3)'; then fail "the hand-written tally is still displayed"; fi
+
 # model-level alert filter: Codex hosts both GPT (258k window) and Kimi (996k), so a
 # Codex thread is alerted only when it runs Kimi.
 codex_session() {  # codex_session <session-id> <model>

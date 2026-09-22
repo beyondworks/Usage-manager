@@ -32,6 +32,11 @@ final class AppModel: ObservableObject {
             if hooks.claude { try? Hooks.install(compactAt: ctxThreshold) }
         }
     }
+    /// How many compactions a session is expected to last before it is worth starting a
+    /// fresh one. Only a yardstick for the count shown on each row — nothing enforces it.
+    @Published var compactLimit: Int {
+        didSet { UserDefaults.standard.set(compactLimit, forKey: "compactLimit") }
+    }
     @Published var alertsOn: Bool {
         didSet {
             UserDefaults.standard.set(alertsOn, forKey: "alertsOn")
@@ -54,6 +59,7 @@ final class AppModel: ObservableObject {
         let d = UserDefaults.standard
         ctxThreshold = d.object(forKey: "ctxThreshold") as? Int ?? 80
         alertsOn = d.object(forKey: "alertsOn") as? Bool ?? true
+        compactLimit = max(1, d.object(forKey: "compactLimit") as? Int ?? 3)
         launchAtLogin = SMAppService.mainApp.status == .enabled
         hooks = Hooks.status()
         // Command-line modes construct this too, and must not touch shared state — the
@@ -208,9 +214,9 @@ final class AppModel: ObservableObject {
         sessions = [
             SessionCtx(tool: .claudeCode, sessionId: "demo01", project: "storefront",
                        title: "결제 리팩터링", model: "claude-opus-5",
-                       ctxTokens: 871_000, windowSize: 1_000_000, mtime: now),
+                       ctxTokens: 871_000, windowSize: 1_000_000, mtime: now, compactions: 3),
             SessionCtx(tool: .claudeCode, sessionId: "demo02", project: "api-gateway",
-                       model: "claude-opus-5", ctxTokens: 486_000, windowSize: 1_000_000, mtime: now),
+                       model: "claude-opus-5", ctxTokens: 486_000, windowSize: 1_000_000, mtime: now, compactions: 1),
             SessionCtx(tool: .codex, sessionId: "demo03", project: "infra",
                        model: "kimi/k3[1m]", ctxTokens: 274_000, windowSize: 996_147, mtime: now),
             SessionCtx(tool: .claudeCode, sessionId: "demo04", project: "docs",

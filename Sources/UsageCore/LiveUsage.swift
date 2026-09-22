@@ -20,6 +20,9 @@ public struct SessionCtx: Sendable, Identifiable, Equatable {
     public let ctxTokens: Int
     public let windowSize: Int
     public let mtime: Date
+    /// How many times this transcript has been compacted. Claude Code only — Codex
+    /// rollouts record no compaction event.
+    public let compactions: Int
 
     public var usedPercent: Double { windowSize > 0 ? Double(ctxTokens) / Double(windowSize) * 100 : 0 }
     public var hasContext: Bool { windowSize > 0 }
@@ -34,7 +37,16 @@ public struct SessionCtx: Sendable, Identifiable, Equatable {
     public var wantsCompactionAlert: Bool {
         tool == .claudeCode || model.lowercased().contains("kimi")
     }
-    public var label: String { title ?? project }
+    /// The count used to be written into the session name by hand ("Argo - 총괄 (0/3)"),
+    /// so that tail is dropped from what is displayed now that the app supplies it. The
+    /// session's own title is never modified.
+    public var label: String {
+        let raw = title ?? project
+        guard let r = raw.range(of: #"\s*\(\s*\d+\s*/\s*\d+\s*\)\s*$"#, options: .regularExpression)
+        else { return raw }
+        let trimmed = raw[..<r.lowerBound].trimmingCharacters(in: .whitespaces)
+        return trimmed.isEmpty ? raw : trimmed
+    }
 
     /// Claude Code reserves output headroom before measuring occupancy: it compacts at
     /// `min(effective × pct/100, effective − 13000)`, where `effective = window − 20000`
@@ -54,9 +66,10 @@ public struct SessionCtx: Sendable, Identifiable, Equatable {
         compactionTokens(pct: pct) - min(30_000, effectiveWindow / 20)
     }
     public init(tool: ToolKind = .claudeCode, sessionId: String, project: String, title: String? = nil,
-                model: String, ctxTokens: Int, windowSize: Int, mtime: Date) {
+                model: String, ctxTokens: Int, windowSize: Int, mtime: Date, compactions: Int = 0) {
         self.tool = tool; self.sessionId = sessionId; self.project = project; self.title = title
         self.model = model; self.ctxTokens = ctxTokens; self.windowSize = windowSize; self.mtime = mtime
+        self.compactions = compactions
     }
 }
 
@@ -83,6 +96,7 @@ public final class LiveScanner: @unchecked Sendable {
     private var recent: [String: Date] = [:]               // session log → mtime, within window
     private var parsed: [String: (size: UInt64, s: SessionCtx?)] = [:]
     private var human: [String: (offset: UInt64, yes: Bool)] = [:]
+    private var compacted: [String: (offset: UInt64, count: Int)] = [:]
     private var claudeWeekly: Limit?
     private var codexWeekly: Limit?
     private var lastFull = Date.distantPast
@@ -110,6 +124,7 @@ public final class LiveScanner: @unchecked Sendable {
             if let s { sessions.append(s.with(mtime: mtime)) }
         }
         human = human.filter { recent[$0.key] != nil }
+        compacted = compacted.filter { recent[$0.key] != nil }
         var limits: [ToolKind: Limit] = [:]
         limits[.claudeCode] = claudeWeekly
         limits[.codex] = codexWeekly
@@ -201,7 +216,8 @@ public final class LiveScanner: @unchecked Sendable {
         guard isHumanAttended(entrypoint: t.entrypoint, path: path) else { return nil }
         return SessionCtx(tool: .claudeCode, sessionId: sid, project: Self.projectLabel(t.cwd), title: t.title,
                           model: t.model, ctxTokens: t.ctxTokens,
-                          windowSize: claudeWindow(sid: sid, model: t.model, ctx: t.ctxTokens), mtime: .distantPast)
+                          windowSize: claudeWindow(sid: sid, model: t.model, ctx: t.ctxTokens), mtime: .distantPast,
+                          compactions: compactionCount(path: path))
     }
 
     /// Only human-attended sessions belong in the list. Transcript `entrypoint`:
@@ -237,6 +253,42 @@ public final class LiveScanner: @unchecked Sendable {
         st.offset = max(st.offset, offset)
         human[path] = st
         return st.yes
+    }
+
+    /// Claude Code writes one `compact_boundary` line per compaction, automatic or
+    /// manual, and never truncates the transcript — so the count is simply how many of
+    /// those the file holds. Counted incrementally: the whole file once (0.4 s for the
+    /// largest here, 47 MB), then only what has been appended since.
+    private static let compactMarker = Data(#""subtype":"compact_boundary""#.utf8)
+
+    private func compactionCount(path: String) -> Int {
+        var st = compacted[path] ?? (0, 0)
+        guard let fh = FileHandle(forReadingAtPath: path) else { return st.count }
+        defer { try? fh.close() }
+        let size = (try? fh.seekToEnd()) ?? 0
+        if size < st.offset { st = (0, 0) }   // replaced or truncated: count again
+        if st.offset < size {
+            try? fh.seek(toOffset: st.offset)
+            var buf = Data()
+            while let chunk = try? fh.read(upToCount: 1 << 20), !chunk.isEmpty {
+                buf.append(chunk)
+                // Hold back the last partial line so a marker split across two reads is
+                // still seen whole, and counted once.
+                guard let nl = buf.lastIndex(of: 0x0A) else { continue }
+                let whole = Data(buf[buf.startIndex...nl])
+                st.count += Self.occurrences(of: Self.compactMarker, in: whole)
+                st.offset += UInt64(whole.count)
+                buf = Data(buf[(nl + 1)...])
+            }
+        }
+        compacted[path] = st
+        return st.count
+    }
+
+    private static func occurrences(of needle: Data, in hay: Data) -> Int {
+        var n = 0, from = hay.startIndex
+        while let r = hay.range(of: needle, in: from..<hay.endIndex) { n += 1; from = r.upperBound }
+        return n
     }
 
     /// Also read by the PreCompact gate, which needs the same two facts (size, and
@@ -337,6 +389,6 @@ public final class LiveScanner: @unchecked Sendable {
 private extension SessionCtx {
     func with(mtime: Date) -> SessionCtx {
         SessionCtx(tool: tool, sessionId: sessionId, project: project, title: title, model: model,
-                   ctxTokens: ctxTokens, windowSize: windowSize, mtime: mtime)
+                   ctxTokens: ctxTokens, windowSize: windowSize, mtime: mtime, compactions: compactions)
     }
 }
