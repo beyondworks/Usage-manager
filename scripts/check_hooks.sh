@@ -497,4 +497,8 @@ grep -q 'codex-stop' "$T/.codex/hooks.json" || fail "uninstall removed someone e
 # meant to hold has already begun. Goes through the app's real alert path.
 HOME="$T" "$BIN" --arm-check || fail "app arms at or after Claude Code's compaction point"
 
+# A credential cached in memory must not outlive the login it came from: signing in as
+# another account rewrites the keychain item, and the quota then belongs to that account.
+HOME="$T" perl -e 'alarm 20; exec @ARGV' "$BIN" --cache-check | sed 's/^/  /' || fail "cache rule check failed"
+
 echo "OK hooks"

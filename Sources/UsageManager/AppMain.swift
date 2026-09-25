@@ -55,6 +55,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if args.contains("--arm-check") { armCheck(); exit(0) }
         if args.contains("--scan-replay") { scanReplay(); exit(0) }
         if args.contains("--mem") { memReport(); exit(0) }
+        if args.contains("--cache-check") { cacheCheck(); exit(0) }
         if args.contains("--gate") {          // PreCompact(auto): hold, or let it through
             guard case .hold = Gate.decide(input: FileHandle.standardInput.readDataToEndOfFile()) else { exit(0) }
             FileHandle.standardError.write(Data(("Usage Manager: 핸드오버가 저장될 때까지 압축을 미룹니다. "
@@ -123,6 +124,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Where the app's memory actually goes, one stage at a time. The desktop metadata
     /// was the suspected cost and turns out to be 2 MB of it; the transcripts are the
     /// rest. Measured as phys_footprint, which is what macOS charges the app.
+    /// The cached credential must not outlive the login it came from. Signing in as a
+    /// different account rewrites the keychain item, and a token cached for up to an
+    /// hour would keep reporting the previous account's quota until it lapsed.
+    @MainActor private func cacheCheck() {
+        let now = Date()
+        let soon = now.addingTimeInterval(600)
+        let a = Date(timeIntervalSince1970: 1_000), b = Date(timeIntervalSince1970: 2_000)
+        var bad = 0
+        func expect(_ got: Bool, _ want: Bool, _ what: String) {
+            print("  \(got == want ? "OK  " : "FAIL")  \(what)")
+            if got != want { bad += 1 }
+        }
+        expect(ClaudeUsage.cacheHolds(until: soon, cachedChange: a, itemChange: a, now: now),
+               true, "valid token, same login — kept")
+        expect(ClaudeUsage.cacheHolds(until: soon, cachedChange: a, itemChange: b, now: now),
+               false, "valid token, signed in again — dropped")
+        expect(ClaudeUsage.cacheHolds(until: now.addingTimeInterval(-1), cachedChange: a, itemChange: a, now: now),
+               false, "lapsed token — dropped")
+        print("  keychain item date readable: \(ClaudeUsage.keychainChangedAt() != nil)")
+        print(bad == 0 ? "OK cache" : "cache check failed")
+        exit(bad == 0 ? 0 : 1)
+    }
+
     @MainActor private func memReport() {
         func line(_ step: String) { print("\(step.padding(toLength: 22, withPad: " ", startingAt: 0)) \(Memory.mb(Memory.footprint))") }
         line("launched")

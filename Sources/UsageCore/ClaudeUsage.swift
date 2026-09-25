@@ -221,13 +221,44 @@ public enum ClaudeUsage {
     /// macOS asks the user to approve one whenever the app's signature has changed —
     /// which, with an ad-hoc signature, is every build. Reading once an hour instead of
     /// every five minutes is the difference between a prompt a day and twelve.
-    private nonisolated(unsafe) static var cachedKeychain: (token: String, until: Date)?
+    ///
+    /// `changed` is the item's own modification date, so a sign-in as a different
+    /// account is noticed at the next poll rather than up to an hour later. Signing in
+    /// rewrites the item; the cached token then belongs to the account before it, and
+    /// the quota it reports is that account's.
+    private nonisolated(unsafe) static var cachedKeychain: (token: String, until: Date, changed: Date?)?
 
     /// Called when the endpoint rejects a credential: whatever is cached is stale.
     static func forgetKeychain() { cachedKeychain = nil }
 
+    /// When the credential item was last written. An attributes-only query: it does not
+    /// return the credential, so it neither exposes it nor asks the user to approve a
+    /// read. nil when the item cannot be found at all.
+    public static func keychainChangedAt() -> Date? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: "Claude Code-credentials",
+            kSecReturnAttributes as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+        var item: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
+              let attrs = item as? [String: Any] else { return nil }
+        return attrs[kSecAttrModificationDate as String] as? Date
+    }
+
+    /// A cached token stands only while it is still valid *and* the item behind it has
+    /// not been rewritten since.
+    public static func cacheHolds(until: Date, cachedChange: Date?, itemChange: Date?, now: Date) -> Bool {
+        until > now && cachedChange == itemChange
+    }
+
     static func keychainToken() -> String? {
-        if let c = cachedKeychain, c.until > Date() { return c.token }
+        let changedAt = keychainChangedAt()
+        if let c = cachedKeychain,
+           cacheHolds(until: c.until, cachedChange: c.changed, itemChange: changedAt, now: Date()) {
+            return c.token
+        }
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: "Claude Code-credentials",
@@ -241,7 +272,7 @@ public enum ClaudeUsage {
         // Re-read shortly before it lapses, and at least every ten minutes, so a
         // credential rotated early is still picked up without asking on every poll.
         let until = min(entry.expires, Date().addingTimeInterval(3600))
-        cachedKeychain = (entry.token, max(Date().addingTimeInterval(600), until.addingTimeInterval(-60)))
+        cachedKeychain = (entry.token, max(Date().addingTimeInterval(600), until.addingTimeInterval(-60)), changedAt)
         // One line per actual read, so the caching can be checked from the log without
         // anything sensitive in it: a fingerprint, never the credential.
         note("keychain read (fingerprint \(fingerprint(entry.token)))")
