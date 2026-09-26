@@ -100,6 +100,7 @@ public enum ClaudeUsage {
                 knownGood = token
                 backoff = (.distantPast, "")
                 lastDiagnosis = "ok"
+                remember(q)
                 return q
             case .expired:
                 rejected += 1
@@ -119,6 +120,50 @@ public enum ClaudeUsage {
         backoff = (Date().addingTimeInterval(600), tokens.first.map(fingerprint) ?? "")
         lastDiagnosis = "http 401 on \(rejected) token(s) — waiting 600s for a fresh session"
         return nil
+    }
+
+    // MARK: - The last reading, kept across launches
+
+    /// A launch whose first lookup is refused has nothing of its own to show, and the
+    /// fallback it used to fall to is a statusLine snapshot — which carries no account.
+    /// A terminal session still signed in as someone else then put that account's
+    /// quota on the row (observed: 0 % left, resetting in two days, while the account
+    /// in use stood at 84 %). So the last live reading is kept, tagged with the account
+    /// it was read for, and used only while that is still the account signed in.
+    static var lastFile: String { Paths.root + "/claude-last.json" }
+
+    /// The account Claude Code is signed in as — its id, from Claude Code's own
+    /// settings file. No credential is read.
+    public static func signedInAccount() -> String? {
+        guard let d = FileManager.default.contents(atPath: Paths.home + "/.claude.json"),
+              let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+              let a = o["oauthAccount"] as? [String: Any] else { return nil }
+        return a["accountUuid"] as? String
+    }
+
+    static func remember(_ q: ProviderQuota) {
+        guard let account = signedInAccount() else { return }
+        var o: [String: Any] = ["account": account, "updatedAt": q.updatedAt.timeIntervalSince1970]
+        if let w = q.weeklyPercent { o["weekly"] = w }
+        if let f = q.fiveHourPercent { o["fiveHour"] = f }
+        if let r = q.resetsAt { o["resetsAt"] = r.timeIntervalSince1970 }
+        guard let data = try? JSONSerialization.data(withJSONObject: o) else { return }
+        try? FileManager.default.createDirectory(atPath: Paths.root, withIntermediateDirectories: true)
+        try? data.write(to: URL(fileURLWithPath: lastFile), options: .atomic)
+    }
+
+    /// The last live reading, or nil when it was read for a different account than the
+    /// one signed in now.
+    public static func lastKnown() -> ProviderQuota? {
+        guard let d = FileManager.default.contents(atPath: lastFile),
+              let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+              let account = o["account"] as? String, account == signedInAccount(),
+              let at = (o["updatedAt"] as? NSNumber)?.doubleValue else { return nil }
+        return ProviderQuota(provider: "anthropic",
+                             weeklyPercent: (o["weekly"] as? NSNumber)?.doubleValue,
+                             fiveHourPercent: (o["fiveHour"] as? NSNumber)?.doubleValue,
+                             resetsAt: (o["resetsAt"] as? NSNumber).map { Date(timeIntervalSince1970: $0.doubleValue) },
+                             updatedAt: Date(timeIntervalSince1970: at))
     }
 
     private enum Answer {

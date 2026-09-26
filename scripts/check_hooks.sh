@@ -58,6 +58,19 @@ OUT=$(printf '%s' "$IN" | HOME="$T" sh -c "$CMD")
 [ -f "$T/.usage-manager/claude-status/$SID.json" ] || fail "no snapshot"
 HOME="$T" "$BIN" --dump | grep -q 'quota Claude .anthropic.: weekly=42%' || fail "gauge did not read snapshot"
 
+# When the live lookup is refused, the snapshot is the fallback — but a snapshot carries
+# no account, and a terminal still signed in as someone else put that account's quota
+# on the row (observed: 0 % left while the account in use stood at 84 %). The last
+# live reading, kept with its account, comes first while that account is signed in.
+printf '{"oauthAccount":{"accountUuid":"acct-in-use"}}' > "$T/.claude.json"
+printf '{"account":"acct-in-use","weekly":16,"fiveHour":3,"resetsAt":4102444800,"updatedAt":%s}' "$(date +%s)" \
+  > "$T/.usage-manager/claude-last.json"
+HOME="$T" "$BIN" --dump | grep -q 'quota Claude .anthropic.: weekly=16%' || fail "a refused lookup fell back to a snapshot over the last reading"
+# ...and once signed in as someone else, that reading is not theirs to show.
+printf '{"oauthAccount":{"accountUuid":"someone-else"}}' > "$T/.claude.json"
+HOME="$T" "$BIN" --dump | grep -q 'quota Claude .anthropic.: weekly=16%' && fail "the previous account's reading was shown after signing in as another"
+rm -f "$T/.claude.json" "$T/.usage-manager/claude-last.json"
+
 # prompt hook: delivers a queued notice exactly once, on either event
 mkdir -p "$T/.usage-manager/alerts"
 probe() {  # probe <session-id> <event> -> hook stdout

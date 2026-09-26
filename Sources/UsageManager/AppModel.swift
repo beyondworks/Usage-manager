@@ -165,7 +165,11 @@ final class AppModel: ObservableObject {
             byId[tool.provider] = ProviderQuota(provider: tool.provider, weeklyPercent: l.percent,
                                                 fiveHourPercent: nil, resetsAt: l.resetsAt, updatedAt: l.updatedAt)
         }
-        for (id, q) in liveQuotas { byId[id] = q }
+        // Claude comes from disk, not memory: every live reading is written there with the
+        // account it belongs to, so a fresh launch has it too, and after signing in as
+        // someone else the previous account's figure stops being shown.
+        for (id, q) in liveQuotas where id != "anthropic" { byId[id] = q }
+        if let q = ClaudeUsage.lastKnown() { byId["anthropic"] = q }
         let ordered = ProviderMeta.sorted(Array(byId.values))
         if quotas != ordered { quotas = ordered }
     }

@@ -93,7 +93,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             byId[tool.provider] = ProviderQuota(provider: tool.provider, weeklyPercent: l.percent,
                                                 fiveHourPercent: nil, resetsAt: l.resetsAt, updatedAt: l.updatedAt)
         }
-        for q in live { byId[q.provider] = q }
+        for q in live where q.provider != "anthropic" { byId[q.provider] = q }
+        if let q = ClaudeUsage.lastKnown() { byId["anthropic"] = q }   // as the app merges it
         print("claude fetch:", ClaudeUsage.lastDiagnosis)
         for q in ProviderMeta.sorted(Array(byId.values)) {
             print("quota \(ProviderMeta.name(q.provider)) [\(q.provider)]: weekly=\(q.weeklyPercent.map{String(Int($0))} ?? "-")% 5h=\(q.fiveHourPercent.map{String(Int($0))} ?? "-")% resets=\(q.resetsAt.map{"\($0)"} ?? "-") age=\(TimeUtil.ageText(q.updatedAt))")
