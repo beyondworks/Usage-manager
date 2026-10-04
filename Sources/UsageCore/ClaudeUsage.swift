@@ -262,10 +262,8 @@ public enum ClaudeUsage {
         return found
     }
 
-    /// Kept in memory for as long as it is valid. Each read is a keychain access, and
-    /// macOS asks the user to approve one whenever the app's signature has changed —
-    /// which, with an ad-hoc signature, is every build. Reading once an hour instead of
-    /// every five minutes is the difference between a prompt a day and twelve.
+    /// Kept in memory for as long as it is valid, so the item is read about once an
+    /// hour rather than on every five-minute poll.
     ///
     /// `changed` is the item's own modification date, so a sign-in as a different
     /// account is noticed at the next poll rather than up to an hour later. Signing in
@@ -304,16 +302,7 @@ public enum ClaudeUsage {
            cacheHolds(until: c.until, cachedChange: c.changed, itemChange: changedAt, now: Date()) {
             return c.token
         }
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: "Claude Code-credentials",
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
-        var item: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
-              let data = item as? Data,
-              let entry = oauthEntry(in: data) else { return nil }
+        guard let data = keychainData(), let entry = oauthEntry(in: data) else { return nil }
         // Re-read shortly before it lapses, and at least every ten minutes, so a
         // credential rotated early is still picked up without asking on every poll.
         let until = min(entry.expires, Date().addingTimeInterval(3600))
@@ -322,6 +311,38 @@ public enum ClaudeUsage {
         // anything sensitive in it: a fingerprint, never the credential.
         note("keychain read (fingerprint \(fingerprint(entry.token)))")
         return entry.token
+    }
+
+    /// The item's contents, read through `/usr/bin/security` — the tool Claude Code
+    /// itself writes the item with — rather than by this app.
+    ///
+    /// Every time Claude Code rewrites the item (observed every few tens of minutes,
+    /// token unchanged) the keychain drops every partition but `apple-tool:`. A direct
+    /// read by this app then passes only if its current signature is still in the
+    /// item's access list; after any rebuild or update it is not, and macOS asks for
+    /// the login password again — and "허용", the default button, remembers nothing.
+    /// `security` is in the access list and holds `apple-tool:`, both of which the
+    /// rewrite keeps, so this read never asks.
+    static func keychainData() -> Data? {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+        p.arguments = ["find-generic-password", "-s", "Claude Code-credentials", "-w"]
+        let out = Pipe(); p.standardOutput = out; p.standardError = Pipe()
+        p.standardInput = FileHandle.nullDevice
+        guard (try? p.run()) != nil else { return nil }
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        guard p.terminationStatus == 0,
+              let text = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !text.isEmpty else { return nil }
+        if text.hasPrefix("{") { return Data(text.utf8) }
+        // `-w` prints the value as hex when it holds bytes it will not print as text.
+        var bytes = [UInt8](), i = text.startIndex
+        while let j = text.index(i, offsetBy: 2, limitedBy: text.endIndex), i < text.endIndex {
+            guard let b = UInt8(text[i..<j], radix: 16) else { return nil }
+            bytes.append(b); i = j
+        }
+        return Data(bytes)
     }
 
     /// Same shape, for installs that keep it in a file instead.
