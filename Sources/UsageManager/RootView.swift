@@ -218,9 +218,11 @@ struct RootView: View {
 
     @ViewBuilder private var limits: some View {
         if model.quotas.isEmpty {
-            Text(model.tools.isEmpty ? "구독 LLM을 찾지 못했습니다" : "한도 읽는 중…")
+            Text(model.tools.isEmpty ? "구독 LLM을 찾지 못했습니다"
+                 : model.quotasFetched ? "읽을 수 있는 한도가 없습니다" : "한도 읽는 중…")
                 .font(.system(size: 12)).foregroundStyle(.white.opacity(0.6))
                 .frame(maxWidth: .infinity, minHeight: 36).background(Self.plate, in: Capsule())
+                .help("Claude: " + ClaudeUsage.lastDiagnosis)
         }
         ForEach(model.quotas) { q in
             // Shown as headroom, not consumption: the bar drains as the week is spent,

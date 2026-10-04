@@ -9,6 +9,9 @@ final class AppModel: ObservableObject {
     /// Weekly (and 5-hour) subscription usage, one row per provider. opencodex is the
     /// primary source; the file-based readers fill any provider it doesn't cover.
     @Published var quotas: [ProviderQuota] = []
+    /// Set once the first live lookup has answered, so an empty row can stop saying it
+    /// is still reading when every source has in fact come back with nothing.
+    @Published var quotasFetched = false
     @Published var sessions: [SessionCtx] = []
 
     private var fileLimits: [ToolKind: Limit] = [:]   // statusLine/rollout fallback
@@ -137,6 +140,7 @@ final class AppModel: ObservableObject {
             await MainActor.run {
                 for q in live { self.liveQuotas[q.provider] = q }   // keep the last good value per provider
                 self.rebuildQuotas()
+                self.quotasFetched = true
                 Self.log(note)
             }
         }
