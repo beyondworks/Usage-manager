@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>Usage Manager</title>
+<style>
+  :root {
+    --panel: #0b0b0b;
+    --plate: rgba(255,255,255,0.08);
+    --fill: rgba(255,255,255,0.2);
+    --fill-strong: rgba(255,255,255,0.42);
+    --dim: rgba(255,255,255,0.55);
+    --ease: cubic-bezier(0.23, 1, 0.32, 1);
+    --t: 220ms;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { background: var(--panel); color: #fff; overflow: hidden; }
+  body {
+    width: 360px; padding: 16px;
+    font: 13px/1.25 "Segoe UI Variable Text", "Segoe UI", "Malgun Gothic", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased; user-select: none; cursor: default;
+  }
+  .num { font-variant-numeric: tabular-nums; }
+  section { margin-top: 16px; }
+  h2 { font-size: 11px; font-weight: 700; color: var(--dim); padding-left: 6px; margin-bottom: 7px; }
+
+  /* Header */
+  header { display: flex; align-items: center; gap: 10px; }
+  .mark { height: 20px; padding: 0 8px; border-radius: 10px; background: #fff; color: #000;
+          font-weight: 900; font-size: 12px; letter-spacing: .02em; display: grid; place-items: center; }
+  header .title { font-size: 15px; font-weight: 700; flex: 1; }
+  button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; }
+  .press { transition: transform 160ms var(--ease); }
+  .press:active { transform: scale(0.97); }
+  .circle { width: 28px; height: 28px; border-radius: 50%; background: var(--plate); display: grid; place-items: center; }
+  .circle.on { background: #fff; color: #000; }
+  .circle svg { width: 14px; height: 14px; }
+  .ring { width: 22px; height: 22px; position: relative; display: grid; place-items: center; }
+  .ring svg { position: absolute; inset: 0; transform: rotate(-90deg); }
+  .ring .bang { font-size: 9px; font-weight: 900; color: rgba(255,255,255,.6); }
+  .ring.wait { opacity: .45; }
+
+  /* Gauge rows: the fill is the gauge */
+  .row { position: relative; display: flex; align-items: center; gap: 10px; height: 44px; padding: 0 16px;
+         border-radius: 999px; background: var(--plate); overflow: hidden; margin-bottom: 6px; transition: opacity var(--t) var(--ease); }
+  .row:last-child { margin-bottom: 0; }
+  .row .bar { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 999px; background: var(--fill);
+              transition: width var(--t) var(--ease), background var(--t) var(--ease); }
+  .row.strong .bar { background: var(--fill-strong); }
+  .row > :not(.bar) { position: relative; }
+  .row .grow { flex: 1; min-width: 0; }
+  /* Darkens just behind the right-hand figures so a long bar never runs over them. */
+  .row .trail { display: flex; align-items: center; gap: 10px; align-self: stretch; padding: 0 16px 0 14px; margin-right: -16px;
+                background: linear-gradient(to right, rgba(11,11,11,0), rgba(11,11,11,.78)); }
+  .logo { width: 24px; height: 24px; flex: none; display: grid; place-items: center; }
+  .logo svg { width: 100%; height: 100%; fill: #fff; }
+  .logo.letter { border-radius: 50%; background: #fff; color: #000; font-weight: 800; font-size: 13px; }
+  .name { font-size: 13px; font-weight: 600; }
+  .note { font-size: 10px; font-weight: 500; color: rgba(255,255,255,.65); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .big { font-size: 16px; font-weight: 700; }
+  .stale { opacity: .5; }
+  .empty { height: 36px; border-radius: 999px; background: var(--plate); display: grid; place-items: center;
+           font-size: 12px; color: rgba(255,255,255,.55); }
+
+  /* Sessions */
+  .list { position: relative; overflow-y: auto; scrollbar-width: none; transition: height var(--t) var(--ease); }
+  .list::-webkit-scrollbar { display: none; }
+  .list .row { height: 36px; padding: 0 13px; }
+  .list .row .trail { padding-right: 13px; margin-right: -13px; }
+  .list .logo { width: 16px; height: 16px; }
+  .list .logo.letter { font-size: 9px; }
+  .label { font-size: 12px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .badge { font-size: 10px; color: rgba(255,255,255,.35); white-space: nowrap; }
+  .badge.loud { font-weight: 600; color: rgba(255,255,255,.8); }
+  .clear { font-size: 10px; font-weight: 600; color: rgba(255,255,255,.85); white-space: nowrap; }
+  .count { font-size: 11px; color: rgba(255,255,255,.4); }
+  .count.spent { font-weight: 700; color: rgba(255,255,255,.9); }
+  .pct { font-size: 12px; font-weight: 600; min-width: 30px; text-align: right; }
+  .over .pct { font-weight: 900; }
+  .idle { opacity: .45; }
+  .enter { animation: enter var(--t) var(--ease) both; }
+  @keyframes enter { from { opacity: 0; transform: scale(0.95); } }
+
+  /* Alerts */
+  .plate { background: var(--plate); border-radius: 999px; height: 36px; padding: 0 14px; display: flex; align-items: center;
+           gap: 8px; margin-bottom: 6px; font-size: 12px; font-weight: 500; transition: opacity var(--t) var(--ease); }
+  .plate .icon { width: 14px; height: 14px; flex: none; }
+  .plate .spacer { flex: 1; }
+  .switch { width: 36px; height: 20px; border-radius: 10px; background: rgba(255,255,255,.18); position: relative; flex: none;
+            transition: background var(--t) var(--ease); }
+  .switch::after { content: ""; position: absolute; top: 3px; left: 3px; width: 14px; height: 14px; border-radius: 50%;
+                   background: #fff; transition: transform var(--t) var(--ease), background var(--t) var(--ease); }
+  .switch.on { background: #fff; }
+  .switch.on::after { transform: translateX(16px); background: #000; }
+  .picker { padding: 0 14px; }
+  .picker .lead { color: rgba(255,255,255,.65); margin-right: 6px; white-space: nowrap; }
+  .steps { flex: 1; display: flex; position: relative; height: 26px; }
+  .step { flex: 1; display: grid; place-items: center; height: 26px; }
+  .dot { width: 5px; height: 5px; border-radius: 50%; background: rgba(255,255,255,.22); }
+  .dot.below { background: rgba(255,255,255,.6); }
+  .chip { position: absolute; top: 2px; height: 22px; border-radius: 11px; background: #fff; color: #000; display: grid;
+          place-items: center; font-size: 11px; font-weight: 700; transition: left var(--t) var(--ease); pointer-events: none; }
+  .off { opacity: .4; }
+  .hooks { border-radius: 18px; height: auto; display: block; padding: 0; }
+  .hooks .line { display: flex; align-items: center; gap: 8px; height: 36px; padding: 0 14px; }
+  .hooks .err { font-size: 10px; color: rgba(255,255,255,.7); padding: 0 14px 10px; }
+  .hooks .logo { width: 16px; height: 16px; }
+  .dimmed { opacity: .3; }
+
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+</style>
+</head>
+<body>
+<header>
+  <div class="mark">LLM</div>
+  <div class="title">Usage Manager</div>
+  <button class="ring press" id="ring" aria-label="지금 조회"></button>
+  <button class="circle press" id="launch"></button>
+  <button class="circle press" id="quit" title="종료" aria-label="종료">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 3v8"/><path d="M6.3 6.8a8 8 0 1 0 11.4 0"/></svg>
+  </button>
+</header>
+<section><h2>남은 한도</h2><div id="limits"></div></section>
+<section><h2 id="sessionsTitle">활성 세션</h2><div id="sessions"></div></section>
+<section><h2>압축 알림</h2><div id="alerts"></div></section>
+
+<script>
+const LOGOS = {
+  anthropic: '<path d="m4.7144 15.9555 4.7174-2.6471.079-.2307-.079-.1275h-.2307l-.7893-.0486-2.6956-.0729-2.3375-.0971-2.2646-.1214-.5707-.1215-.5343-.7042.0546-.3522.4797-.3218.686.0608 1.5179.1032 2.2767.1578 1.6514.0972 2.4468.255h.3886l.0546-.1579-.1336-.0971-.1032-.0972L6.973 9.8356l-2.55-1.6879-1.3356-.9714-.7225-.4918-.3643-.4614-.1578-1.0078.6557-.7225.8803.0607.2246.0607.8925.686 1.9064 1.4754 2.4893 1.8336.3643.3035.1457-.1032.0182-.0728-.164-.2733-1.3539-2.4467-1.445-2.4893-.6435-1.032-.17-.6194c-.0607-.255-.1032-.4674-.1032-.7285L6.287.1335 6.6997 0l.9957.1336.419.3642.6192 1.4147 1.0018 2.2282 1.5543 3.0296.4553.8985.2429.8318.091.255h.1579v-.1457l.1275-1.706.2368-2.0947.2307-2.6957.0789-.7589.3764-.9107.7468-.4918.5828.2793.4797.686-.0668.4433-.2853 1.8517-.5586 2.9021-.3643 1.9429h.2125l.2429-.2429.9835-1.3053 1.6514-2.0643.7286-.8196.85-.9046.5464-.4311h1.0321l.759 1.1293-.34 1.1657-1.0625 1.3478-.8804 1.1414-1.2628 1.7-.7893 1.36.0729.1093.1882-.0183 2.8535-.607 1.5421-.2794 1.8396-.3157.8318.3886.091.3946-.3278.8075-1.967.4857-2.3072.4614-3.4364.8136-.0425.0304.0486.0607 1.5482.1457.6618.0364h1.621l3.0175.2247.7892.522.4736.6376-.079.4857-1.2142.6193-1.6393-.3886-3.825-.9107-1.3113-.3279h-.1822v.1093l1.0929 1.0686 2.0035 1.8092 2.5075 2.3314.1275.5768-.3218.4554-.34-.0486-2.2039-1.6575-.85-.7468-1.9246-1.621h-.1275v.17l.4432.6496 2.3436 3.5214.1214 1.0807-.17.3521-.6071.2125-.6679-.1214-1.3721-1.9246L14.38 17.959l-1.1414-1.9428-.1397.079-.674 7.2552-.3156.3703-.7286.2793-.6071-.4614-.3218-.7468.3218-1.4753.3886-1.9246.3157-1.53.2853-1.9004.17-.6314-.0121-.0425-.1397.0182-1.4328 1.9672-2.1796 2.9446-1.7243 1.8456-.4128.164-.7164-.3704.0667-.6618.4008-.5889 2.386-3.0357 1.4389-1.882.929-1.0868-.0062-.1579h-.0546l-6.3385 4.1164-1.1293.1457-.4857-.4554.0608-.7467.2307-.2429 1.9064-1.3114Z"/>',
+  openai: '<path d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.667zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z"/>',
+  kimi: '<path d="M21.765.351C22.998.351 24 1.353 24 2.586S22.998 4.82 21.765 4.82h-1.974c-.15 0-.26-.12-.26-.26V2.586A2.237 2.237 0 0 1 21.765.35M9.41 13.388l8.447-8.377c.16-.16.07-.471-.14-.471h-4.55s-.1.02-.14.06l-9.099 9.029c-.14.14-.35.02-.35-.21V4.81c0-.15-.1-.27-.221-.27H.22c-.12 0-.22.12-.22.27v18.57c0 .15.1.27.22.27h3.137c.12 0 .22-.12.22-.27v-3.79c0-.08.03-.16.08-.21l2.826-2.796c.07-.07.16-.08.241-.03l7.546 5.551a8.9 8.9 0 0 0 4.018 1.493c.12.01.23-.11.23-.27V19.76c0-.14-.08-.25-.19-.26a5.8 5.8 0 0 1-2.355-.942l-6.533-4.73c-.14-.09-.15-.32-.03-.441"/>',
+};
+const ICONS = {
+  bell: '<path d="M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>',
+  bellOff: '<path d="M8.7 3A6 6 0 0 1 18 8a21.3 21.3 0 0 0 .6 5"/><path d="M17 17H3s3-2 3-9a4.67 4.67 0 0 1 .3-1.7"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/><path d="m2 2 20 20"/>',
+  link: '<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>',
+  sunrise: '<path d="M12 2v8"/><path d="m4.93 10.93 1.41 1.41"/><path d="M2 18h2"/><path d="M20 18h2"/><path d="m19.07 10.93-1.41 1.41"/><path d="M22 22H2"/><path d="m8 6 4-4 4 4"/><path d="M16 18a4 4 0 0 0-8 0"/>',
+};
+const NAMES = { anthropic: 'Claude', openai: 'Codex', kimi: 'Kimi' };
+const THRESHOLDS = [50, 55, 60, 65, 70, 75, 80, 85, 90, 95];
+const ROW = 36, GAP = 6, VISIBLE = 5, PEEK = ROW * 0.55, FADE = 14;
+
+const tauri = window.__TAURI__;
+const invoke = (cmd, args) => tauri ? tauri.core.invoke(cmd, args) : Promise.resolve(demoAct(cmd, args));
+let S = null;
+let shown = new Set();
+let scrollTop = 0;
+
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const svg = (paths, cls = '') => `<svg class="${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${paths}</svg>`;
+function logo(id) {
+  if (LOGOS[id]) return `<span class="logo"><svg viewBox="0 0 24 24">${LOGOS[id]}</svg></span>`;
+  return `<span class="logo letter">${esc((NAMES[id] || id).slice(0, 1).toUpperCase())}</span>`;
+}
+function shortSpan(s) {
+  s = Math.round(s);
+  if (s < 60) return `${s}초`;
+  if (s < 3600) return `${Math.floor(s / 60)}분`;
+  const m = Math.floor((s % 3600) / 60);
+  return m ? `${Math.floor(s / 3600)}시간 ${m}분` : `${Math.floor(s / 3600)}시간`;
+}
+const manCount = n => n >= 10000 ? `${Math.floor(n / 10000)}만` : `${Math.floor(n / 1000)}천`;
+const now = () => Date.now() / 1000;
+
+function render() {
+  if (!S) return;
+  // Header
+  document.getElementById('launch').className = 'circle press' + (S.launchAtLogin ? ' on' : '');
+  document.getElementById('launch').title = S.launchAtLogin ? '로그인 시 자동 실행: 켬' : '로그인 시 자동 실행: 끔';
+  document.getElementById('launch').setAttribute('aria-label', document.getElementById('launch').title);
+  document.getElementById('launch').innerHTML = svg(ICONS.sunrise);
+
+  // Limits, shown as headroom: the bar drains as the week is spent.
+  const L = document.getElementById('limits');
+  L.innerHTML = S.quotas.length === 0
+    ? `<div class="empty" title="Claude: ${esc(S.claudeDiagnosis)}">${!S.tools.length ? '구독 LLM을 찾지 못했습니다' : S.quotasFetched ? '읽을 수 있는 한도가 없습니다' : '한도 읽는 중…'}</div>`
+    : S.quotas.map(q => `
+      <div class="row${q.strong ? ' strong' : ''}${q.stale ? ' stale' : ''}">
+        <div class="bar" style="width:${q.ratio > 0 ? `max(44px, ${Math.min(1, q.ratio) * 100}%)` : '0'}"></div>
+        ${logo(q.provider)}
+        <div class="grow"><div class="name">${esc(q.name)}</div><div class="note">${esc(q.note)}</div></div>
+        <div class="trail"><span class="big num" style="opacity:${q.left == null ? .4 : 1}">${q.left == null ? '—' : q.left + '%'}</span></div>
+      </div>`).join('');
+
+  // Sessions
+  document.getElementById('sessionsTitle').textContent = `활성 세션 ${S.sessions.length}`;
+  const box = document.getElementById('sessions');
+  if (S.sessions.length === 0) {
+    box.innerHTML = '<div class="empty">작업 중인 세션 없음</div>';
+  } else {
+    const content = S.sessions.length * (ROW + GAP) - GAP;
+    // Past five the list keeps its height and shows part of the next row.
+    const height = S.sessions.length <= VISIBLE ? content : VISIBLE * (ROW + GAP) - GAP + PEEK;
+    box.innerHTML = `<div class="list" id="list" style="height:${height}px">${S.sessions.map(s => `
+      <div class="row${s.over ? ' strong over' : ''}${s.idle ? ' idle' : ''}${shown.has(s.id) ? '' : ' enter'}" title="${esc(s.help)}">
+        <div class="bar" style="width:${s.ratio > 0 ? `max(36px, ${Math.min(1, s.ratio) * 100}%)` : '0'}"></div>
+        ${logo(s.provider)}
+        <div class="grow label">${esc(s.label)}</div>
+        <div class="trail">
+          ${s.cache ? `<span class="badge num" data-cache='${JSON.stringify(s.cache)}'></span>` : ''}
+          ${s.clear ? `<span class="clear">${esc(s.clear)}</span>` : ''}
+          ${s.count ? `<span class="count num${s.countSpent ? ' spent' : ''}">${esc(s.count)}</span>` : ''}
+          <span class="pct num">${s.pct}%</span>
+        </div>
+      </div>`).join('')}</div>`;
+    shown = new Set(S.sessions.map(s => s.id));
+    const list = document.getElementById('list');
+    list.scrollTop = scrollTop;
+    list.addEventListener('scroll', () => { scrollTop = list.scrollTop; fade(list); });
+    fade(list);
+  }
+
+  // Alerts
+  const pick = THRESHOLDS.indexOf(S.ctxThreshold);
+  document.getElementById('alerts').innerHTML = `
+    <div class="plate">${svg(S.alertsOn ? ICONS.bell : ICONS.bellOff, 'icon')}<span>푸시 알림</span><span class="spacer"></span>
+      <button class="switch press${S.alertsOn ? ' on' : ''}" id="alertsSwitch" aria-label="푸시 알림"></button></div>
+    <div class="plate picker${S.alertsOn ? '' : ' off'}"><span class="lead">기준</span>
+      <div class="steps">${THRESHOLDS.map(t => `<button class="step press" data-t="${t}" title="${t}%" aria-label="기준 ${t}%">${t === S.ctxThreshold ? '' : `<span class="dot${t < S.ctxThreshold ? ' below' : ''}"></span>`}</button>`).join('')}
+        <div class="chip num" style="width:32px; left:calc(${(pick + 0.5) * 10}% - 16px)">${S.ctxThreshold}</div></div></div>
+    <div class="plate hooks"><div class="line" title="Claude Code의 statusLine(주간 한도 수집), 프롬프트·도구 호출 훅(압축 알림), 압축 직전 훅(핸드오버 보류)을 설치합니다.">
+      ${svg(ICONS.link, 'icon')}<span>에이전트 훅</span><span class="spacer"></span>
+      <span class="${S.hooksOn ? '' : 'dimmed'}" title="Claude Code 훅 ${S.hooksOn ? '연결됨' : '미연결'}">${logo('anthropic')}</span>
+      <button class="switch press${S.hooksOn ? ' on' : ''}" id="hooksSwitch" aria-label="에이전트 훅"></button></div>
+      ${S.hookError ? `<div class="err">${esc(S.hookError)}</div>` : ''}</div>`;
+  tick();
+  fit();
+}
+
+/// An alpha mask, so the rows themselves fade; each edge only when there is more that way.
+function fade(list) {
+  const top = list.scrollTop > 2, bottom = list.scrollTop + list.clientHeight < list.scrollHeight - 2;
+  const g = `linear-gradient(to bottom, ${top ? `transparent, #000 ${FADE}px` : '#000'}, ${bottom ? `#000 calc(100% - ${FADE}px), transparent` : '#000'})`;
+  list.style.webkitMaskImage = g;
+  list.style.maskImage = g;
+}
+
+/// Once a second: the refresh ring and the prompt-cache badges.
+function tick() {
+  if (!S) return;
+  const t = now();
+  const ring = document.getElementById('ring');
+  const limited = S.claudeWait > 0;
+  const left = Math.max(0, S.nextQuotaFetch - t);
+  const ratio = limited ? 1 : Math.min(1, left / S.quotaInterval);
+  const c = 2 * Math.PI * 10;
+  ring.className = 'ring press' + (S.manualReady ? '' : ' wait');
+  ring.title = limited
+    ? `Claude 조회 제한 — 약 ${Math.round(S.claudeWait / 60)}분 뒤 재시도. 지금 누르면 나머지만 조회합니다`
+    : `다음 조회까지 ${Math.round(left / 60)}분 · 눌러서 지금 조회`;
+  ring.innerHTML = `<svg viewBox="0 0 22 22"><circle cx="11" cy="11" r="10" fill="none" stroke="rgba(255,255,255,.14)" stroke-width="2"/>
+    <circle cx="11" cy="11" r="10" fill="none" stroke="rgba(255,255,255,${limited ? .3 : .7})" stroke-width="2" stroke-linecap="round"
+      stroke-dasharray="${c * ratio} ${c}"/></svg>${limited ? '<span class="bang">!</span>' : ''}`;
+  // "캐시 42분" while it holds, "재작성 60만" once it lapses — what the next message rewrites.
+  document.querySelectorAll('[data-cache]').forEach(el => {
+    const k = JSON.parse(el.dataset.cache);
+    const remain = Math.max(0, k.at + k.ttl - t);
+    el.textContent = remain > 0 ? `캐시 ${shortSpan(remain)}` : `재작성 ${manCount(k.tokens)}`;
+    el.classList.toggle('loud', remain <= 300);
+  });
+}
+
+function fit() {
+  invoke('fit', { height: Math.ceil(document.body.getBoundingClientRect().height) });
+}
+
+document.addEventListener('click', e => {
+  const b = e.target.closest('button');
+  if (!b || !S) return;
+  if (b.id === 'ring') invoke('refresh_now');
+  else if (b.id === 'launch') invoke('set_launch', { on: !S.launchAtLogin });
+  else if (b.id === 'quit') invoke('quit');
+  else if (b.id === 'alertsSwitch') invoke('set_alerts', { on: !S.alertsOn });
+  else if (b.id === 'hooksSwitch') invoke('set_hooks', { on: !S.hooksOn });
+  else if (b.dataset.t) invoke('set_threshold', { value: +b.dataset.t });
+});
+document.addEventListener('keydown', e => { if (e.key === 'Escape') invoke('hide'); });
+setInterval(tick, 1000);
+
+if (tauri) {
+  tauri.event.listen('state', e => { S = e.payload; render(); });
+  invoke('state').then(v => { S = v; render(); });
+} else {
+  // Outside the app (a plain browser), sample data so the page can be looked at.
+  S = demoState();
+  render();
+}
+
+function demoState() {
+  const t = now();
+  const rows = +new URLSearchParams(location.search).get('rows') || 3;
+  const names = ['결제 리팩터링', '검색 색인 재구축', '온보딩 문서', '요금제 마이그레이션', '장바구니 복구', '재고 동기화', '알림 센터', '감사 로그 정리'];
+  return {
+    tools: ['claude_code', 'codex'], ctxThreshold: 80, alertsOn: true, compactLimit: 3, hooksOn: true, hookError: null,
+    launchAtLogin: false, nextQuotaFetch: t + 200, quotaInterval: 300, claudeWait: 0, manualReady: true, now: t,
+    quotas: [
+      { provider: 'anthropic', name: 'Claude', left: 62, ratio: .62, strong: false, note: '5시간 79% · 리셋 4일 4시간 후 · 방금', stale: false },
+      { provider: 'openai', name: 'Codex', left: 14, ratio: .14, strong: true, note: '리셋 2일 12시간 후 · 3분 전', stale: false },
+      { provider: 'kimi', name: 'Kimi', left: 36, ratio: .36, strong: false, note: '5시간 45% · 리셋 5일 2시간 후 · 방금', stale: false },
+    ],
+    sessions: Array.from({ length: rows }, (_, i) => {
+      const pct = Math.max(5, 87 - i * 9);
+      return { id: 'demo' + i, label: names[i % names.length], provider: 'anthropic', pct, ratio: pct / 100, over: pct >= 80,
+        idle: i === 2, clear: i === 0 ? 'clear 권장' : null, count: `${[3, 1, 0, 2][i % 4]}/3`, countSpent: i === 0,
+        cache: i === 0 ? null : { at: t - (i === 1 ? 3480 : 400), ttl: 3600, tokens: pct * 10000 }, help: 'Claude Code · claude-opus-5' };
+    }),
+  };
+}
+function demoAct(cmd, a) {
+  if (cmd === 'set_threshold') S.ctxThreshold = a.value;
+  else if (cmd === 'set_alerts') S.alertsOn = a.on;
+  else if (cmd === 'set_hooks') S.hooksOn = a.on;
+  else if (cmd === 'set_launch') S.launchAtLogin = a.on;
+  else return;
+  render();
+}
+</script>
+</body>
+</html>

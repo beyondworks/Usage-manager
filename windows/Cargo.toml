@@ -1,0 +1,37 @@
+[package]
+name = "usage-manager"
+version = "2.6.2"
+edition = "2021"
+description = "Usage Manager for Windows: subscription limits and session context in the tray"
+license = "MIT"
+
+[[bin]]
+name = "UsageManager"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-notification = "2"
+tauri-plugin-autostart = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+ureq = { version = "2", default-features = false, features = ["native-tls", "json"] }
+native-tls = "0.2"
+notify = "6"
+regex = "1"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_System_Console", "Win32_System_Registry", "Win32_Foundation", "Win32_Graphics_Dwm"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+opt-level = "s"

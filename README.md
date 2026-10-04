@@ -145,6 +145,36 @@ Codex에는 설치하지 않는다. Codex는 자체 압축을 기록으로 남�
 
 keychain 접근 승인 창은 뜨지 않는다. 항목은 Claude Code가 저장할 때 쓰는 `/usr/bin/security`를 거쳐 읽는데, 이 도구는 항목의 허용 목록에 처음부터 들어 있다. 앱이 직접 읽던 때는 Claude Code가 항목을 다시 쓸 때마다(토큰이 그대로여도 수십 분 간격) 앱의 허용이 빠져, 앱을 새로 빌드하거나 업데이트한 뒤에는 로그인 암호를 거듭 물었다.
 
+## 윈도우
+
+같은 기능을 작업표시줄 트레이에서 쓰는 윈도우판이 [`windows/`](windows/)에 있다. 판단 규칙(압축 지점, 예고, 보류, clear 권장, 한도 병합)은 맥판을 줄 단위로 옮겼고, 맥판 자체검사의 항목을 같은 기대값의 테스트로 옮겨 두었다. 버전 번호도 맥판과 같이 간다.
+
+**설치.** `UsageManager-x.y.z-windows-x64-setup.exe`를 실행한다. 관리자 권한 없이 `%LOCALAPPDATA%\Programs\Usage Manager`에 설치되고 시작 메뉴에 바로가기가 생긴다. 윈도우 10/11 x64. 화면은 WebView2로 그리는데 윈도우 11에는 들어 있고, 없으면 설치 중에 안내한다.
+
+> 코드 서명 인증서가 없어 처음 실행할 때 SmartScreen 경고가 뜰 수 있다. **추가 정보 → 실행**을 누르면 된다.
+
+윈도우 11은 새 트레이 아이콘을 숨겨진 아이콘(**^**) 안에 넣는다. 늘 보이게 하려면 그 안의 아이콘을 작업표시줄로 끌어 놓거나, **설정 → 개인 설정 → 작업 표시줄 → 기타 시스템 트레이 아이콘**에서 Usage Manager를 켠다. 아이콘을 누르면 팝오버가 그 위에 열리고, 바깥을 누르거나 Esc를 누르면 닫힌다. 트레이에는 색이 입혀지지 않으므로 작업표시줄이 어두우면 흰 아이콘, 밝으면 검은 아이콘을 쓴다.
+
+맥판과 다른 점:
+
+- **훅.** 윈도우의 Claude Code는 훅 명령을 Git Bash로 실행한다. 그래서 `.sh` 스크립트를 두지 않고, 설정에는 설치된 실행 파일을 직접 부르는 명령(`"…/UsageManager.exe" --gate` 등)이 들어간다. 실행 파일 위치가 바뀌면 다음에 훅을 켤 때 예전 항목을 새 경로로 바꾼다. 압축을 이어 가게 하는 `touch ~/.usage-manager/pressed/<세션>` 지시는 Git Bash에서 그대로 동작한다.
+- **Claude 한도.** keychain 대신 Claude Code가 로그인 정보를 두는 `~/.claude/.credentials.json`을 읽는다. 만료된 토큰은 쓰지 않는다. Claude Code가 이 정보를 Windows 자격 증명 관리자에 두는 경우(Claude Code 쪽 기능 플래그로 켜진다)는 확인하지 못했고 읽지 않는다. 그때도 에이전트 훅을 켜 두면 statusLine으로 받은 주간 한도는 보인다.
+- **데스크톱 앱 세션 이름.** `%APPDATA%\Claude\claude-code-sessions`에서 읽도록 맥판과 같은 구조로 만들었지만, 윈도우 데스크톱 앱이 실제로 이 경로를 쓰는지는 확인하지 못했다. 메타데이터를 찾지 못하면 맥판과 같이 아무 세션도 숨기지 않고 대화 기록의 이름이나 폴더명을 쓴다.
+- **로그인 시 자동 실행**은 `HKCU\…\Run`의 `Usage Manager` 항목이다.
+
+**제거.** 설정 → 앱에서 제거한다. 제거 프로그램이 먼저 Claude Code 설정에서 우리 훅을 빼고(없으면 설정 파일을 건드리지 않는다), 자동 실행 항목과 바로가기를 지운다. `~/.usage-manager`(설정·기록)는 맥판처럼 남긴다.
+
+**빌드와 점검.** 맥에서 교차 빌드한다(`rustup target add x86_64-pc-windows-gnu`, `brew install mingw-w64 makensis`).
+
+```bash
+cd windows
+cargo test                 # 판단 규칙 (맥에서 그대로 돈다)
+scripts/build.sh           # 테스트 → 윈도우용 빌드 → dist/ 에 설치 파일
+bash scripts/check.sh      # 윈도우의 Git Bash에서: 설정에 적힌 훅 명령을 Claude Code처럼 실행해 확인 (임시 홈)
+UsageManager.exe --dump    # 읽어 들인 한도·세션·훅 상태 출력
+UsageManager.exe --demo --show  # 데모 데이터로 팝오버를 바로 연다 (화면 확인·스크린샷용)
+```
+
 ## 직접 빌드
 
 ```bash

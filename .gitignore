@@ -18,6 +18,12 @@ AppIcon.icns
 # Local verification captures (the README image is tracked)
 *.png
 !docs/*.png
+!windows/icons/*.png
 
 # Release artifacts
 dist/
+
+# Windows build output
+windows/target/
+windows/dist/
+windows/gen/
