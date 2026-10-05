@@ -3,8 +3,8 @@
 #
 #   scripts/make_release.sh            → dist/UsageManager-<ver>-{apple-silicon,intel}.dmg
 #
-# macOS only. The app is built on SwiftUI's MenuBarExtra, AppKit, FSEvents and
-# ServiceManagement, so there is no Windows or Linux target to package.
+# macOS only: this app is SwiftUI/AppKit. The Windows version is a separate app in
+# windows/, packaged by windows/scripts/build.sh.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"

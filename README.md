@@ -2,7 +2,7 @@
 
 # Usage Manager
 
-**구독형 코딩 에이전트의 남은 한도와 세션 컨텍스트를 메뉴바에서 본다.**
+**구독형 코딩 에이전트의 남은 한도와 세션 컨텍스트를 메뉴바(맥)와 트레이(윈도우)에서 본다.**
 
 로그인 없이, 로컬 파일만 읽어서.
 
@@ -123,12 +123,13 @@ Claude 한도는 Claude Code가 최신으로 유지하는 keychain 항목을 읽
 
 ## 설치
 
-[**Releases**](../../releases/latest)에서 맥에 맞는 DMG를 받는다.
+[**Releases**](../../releases/latest)에서 맞는 파일을 받는다.
 
-| 맥 | 파일 |
+| 환경 | 파일 |
 |---|---|
 | Apple Silicon (M1~) | `UsageManager-x.y-apple-silicon.dmg` |
 | Intel | `UsageManager-x.y-intel.dmg` |
+| 윈도우 10/11 x64 | `UsageManager-x.y-windows-x64-setup.exe` ([윈도우](#윈도우) 참고) |
 
 열어서 `Usage Manager`를 Applications로 끌어 놓는다. macOS 14 이상.
 
@@ -149,7 +150,9 @@ keychain 접근 승인 창은 뜨지 않는다. 항목은 Claude Code가 저장�
 
 같은 기능을 작업표시줄 트레이에서 쓰는 윈도우판이 [`windows/`](windows/)에 있다. 판단 규칙(압축 지점, 예고, 보류, clear 권장, 한도 병합)은 맥판을 줄 단위로 옮겼고, 맥판 자체검사의 항목을 같은 기대값의 테스트로 옮겨 두었다. 버전 번호도 맥판과 같이 간다.
 
-**설치.** `UsageManager-x.y.z-windows-x64-setup.exe`를 실행한다. 관리자 권한 없이 `%LOCALAPPDATA%\Programs\Usage Manager`에 설치되고 시작 메뉴에 바로가기가 생긴다. 윈도우 10/11 x64. 화면은 WebView2로 그리는데 윈도우 11에는 들어 있고, 없으면 설치 중에 안내한다.
+<img src="docs/screenshot-windows.png" width="360" alt="윈도우 트레이 팝오버">
+
+**설치.** `UsageManager-x.y-windows-x64-setup.exe`를 실행한다. 관리자 권한 없이 `%LOCALAPPDATA%\Programs\Usage Manager`에 설치되고 시작 메뉴에 바로가기가 생긴다. 윈도우 10/11 x64. 화면은 WebView2로 그리는데 윈도우 11에는 들어 있고, 없으면 설치 중에 안내한다.
 
 > 코드 서명 인증서가 없어 처음 실행할 때 SmartScreen 경고가 뜰 수 있다. **추가 정보 → 실행**을 누르면 된다.
 
@@ -196,7 +199,8 @@ scripts/check_hooks.sh            # 자체검사 (임시 홈에서 훅 설치·�
 2. 설치본에서 실제 동작 확인 — 화면은 `--snap`, 판단은 `--dump`
 3. **README 서술이 현재 동작과 맞는가**
 4. **스크린샷이 현재 UI인가** — `USAGE_MANAGER_DEMO=1 .build/debug/UsageManager --snap docs/screenshot.png` (데모 모드라 실제 계정 값과 세션 이름이 들어가지 않는다)
-5. 버전 올리기(`scripts/Info.plist`) → DMG 두 개 → 태그 → 게시본 해시 대조
+5. 윈도우판: `cd windows && scripts/build.sh`(테스트 포함), 윈도우 PC의 Git Bash에서 `scripts/check.sh`, 설치본을 `--demo --show`로 열어 `docs/screenshot-windows.png` 갱신
+6. 버전 올리기(`scripts/Info.plist`, `windows/Cargo.toml`, `windows/tauri.conf.json`) → DMG 두 개 + 윈도우 설치 파일 → 태그 → 게시본 해시 대조
 
 ## 라이선스
 

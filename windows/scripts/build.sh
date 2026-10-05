@@ -2,7 +2,7 @@
 # Build the Windows installer on macOS (or Linux): a cross-compiled release executable,
 # then an NSIS setup around it.
 #   needs: rustup target x86_64-pc-windows-gnu, mingw-w64, makensis (brew install mingw-w64 makensis)
-#   out:   windows/dist/UsageManager-<version>-windows-x64-setup.exe
+#   out:   windows/dist/UsageManager-<version>-windows-x64-setup.exe (version as the DMGs name it)
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -22,7 +22,8 @@ REL="$ROOT/target/x86_64-pc-windows-gnu/release"
 [ -f "$REL/WebView2Loader.dll" ] || cp "$(find "$ROOT/target/x86_64-pc-windows-gnu/release/build" -path '*x64/WebView2Loader.dll' | head -1)" "$REL/"
 
 mkdir -p dist
-OUT="dist/UsageManager-$VERSION-windows-x64-setup.exe"
+# Named like the DMGs: 2.7.0 → 2.7, 2.6.2 stays 2.6.2.
+OUT="dist/UsageManager-${VERSION%.0}-windows-x64-setup.exe"
 # makensis reads the script in the locale’s encoding; under the C locale it rejects UTF-8.
 LC_ALL=en_US.UTF-8 makensis -V2 -DVERSION="$VERSION" -DSRC="$REL" -DOUT="$ROOT/$OUT" installer.nsi
 shasum -a 256 "$OUT"
