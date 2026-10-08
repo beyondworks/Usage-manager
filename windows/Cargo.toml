@@ -1,6 +1,6 @@
 [package]
 name = "usage-manager"
-version = "2.7.0"
+version = "2.7.1"
 edition = "2021"
 description = "Usage Manager for Windows: subscription limits and session context in the tray"
 license = "MIT"
