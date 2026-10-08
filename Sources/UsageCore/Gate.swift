@@ -50,7 +50,9 @@ public enum Gate {
             log("\(sid) pass — \(why)")
             // Remember whether the compaction about to run had a handover behind it, so
             // the app can tell "saved, safe to clear" from "clearing would lose this".
-            recordPass(sid, handover: why == handoverReason)
+            // Both "handover written" and "handover written ahead of the warning" — the
+            // second is the session doing exactly what the warning asked.
+            recordPass(sid, handover: why.hasPrefix(handoverReason))
         case .hold(let why):
             log("\(sid) \(why)")
         }

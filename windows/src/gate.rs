@@ -50,10 +50,11 @@ pub fn decide(input: &[u8]) -> Decision {
         Decision::Pass(why) => {
             log(&format!("{sid} pass — {why}"));
             // Whether the compaction about to run had a handover behind it, so the app can
-            // tell "saved, safe to clear" from "clearing would lose this".
+            // tell "saved, safe to clear" from "clearing would lose this" — written at the
+            // gate or ahead of the warning alike.
             if sid != "?" {
                 let _ = std::fs::create_dir_all(dir("lastpass"));
-                let _ = std::fs::write(dir("lastpass").join(&sid), if why == HANDOVER_REASON { "handover" } else { "other" });
+                let _ = std::fs::write(dir("lastpass").join(&sid), if why.starts_with(HANDOVER_REASON) { "handover" } else { "other" });
             }
         }
         Decision::Hold(why) => log(&format!("{sid} {why}")),
@@ -319,6 +320,9 @@ mod tests {
         grown(&h, 832_000, 832_900);
         assert!(!gate(&h, SID, ""), "a session that prepared after the warning was held");
         assert!(!warning(SID).exists(), "the warning outlived the compaction");
+        // A compaction with a handover behind it; recorded otherwise, the app reported it
+        // as compacted with nothing saved.
+        assert_eq!(std::fs::read_to_string(dir("lastpass").join(SID)).unwrap(), "handover");
 
         set_mtime(&warning(SID), 30 * 60);
         set_mtime(&pressed(SID), 15 * 60);

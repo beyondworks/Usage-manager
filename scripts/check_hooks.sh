@@ -390,6 +390,9 @@ touch -t "$(date -v-30M +%Y%m%d%H%M)" "$T/.usage-manager/warned/$GSID"
 touch -t "$(date -v-15M +%Y%m%d%H%M)" "$T/.usage-manager/pressed/$GSID"
 grown 832000 832900
 [ "$(gate "$GSID")" = 0 ] || fail "a session that prepared after the warning was held anyway"
+# ...and that is a compaction with a handover behind it, not one without: recorded
+# otherwise, the app told the user the session had been compacted with nothing saved.
+[ "$(cat "$T/.usage-manager/lastpass/$GSID")" = handover ] || fail "a handover written ahead of the warning was recorded as '$(cat "$T/.usage-manager/lastpass/$GSID")'"
 [ ! -f "$T/.usage-manager/warned/$GSID" ] || fail "the warning outlived the compaction"
 [ -z "$(ls "$T/.usage-manager/holds/" 2>/dev/null)" ] || fail "held after passing on the warning"
 
